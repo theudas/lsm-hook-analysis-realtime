@@ -1,32 +1,100 @@
 # LSM Hook Realtime Analysis
 
-实时版 LSM hook 分析服务，复用 `lsm-hook-analysis-v2` 的 round 输入格式、分析报告格式和内核报告上报接口，但把原来的 cron 批处理改成常驻流水线：
+实时版 LSM hook 分析服务。它会持续接收监控服务推送的 round 信息，收到完整 round 后立即分析，并把分析报告路径上报给后端接口。
 
-1. `lha_realtime/receiver.py` 监听 Socket.IO `push` 事件。
-2. 接收回调把原始消息快速写入 SQLite inbox。
-3. 后台 ingest worker 将 `round_end` / `round_kernel` 写入 `input/<round_id>/`，并拷贝内核 JSONL 文件。
-4. round 同时具备 `round_end.json` 和 `round_kernel.json` 后进入分析队列。
-5. analyze worker 生成 `analysis_violations.jsonl` / `analysis_report.md`，并上报报告路径。
+## 1. 服务做什么
 
-SQLite 只保存控制数据：消息状态、round generation、文件路径、分析任务状态、错误和重试次数。JSON/JSONL 输入文件和 Markdown 报告仍保存在文件系统中。
+处理链路：
 
-## Run
+```text
+Socket.IO push
+  -> SQLite inbox
+  -> input/<round_id>/ 文件落盘
+  -> 分析 round
+  -> 生成 analysis_report.md
+  -> POST 上报报告路径
+```
 
-首次运行先安装依赖：
+说明：
+
+- SQLite 只保存消息状态、round 状态、任务状态和文件路径。
+- 真实输入和输出文件保存在 `input/<round_id>/` 下。
+- 同一个 `round_id` 再次到达时，会作为新的 round 重新处理。
+
+## 2. 推荐部署方式
+
+服务器部署建议直接使用一键脚本。两个脚本都会先删除已有的 `lha_realtime.service`，再重新部署并启动。
+
+### 2.1 不上报 Mock Round
+
+默认模式：`is_mock=true` 的 round 会分析并生成报告，但不会上报。
+
+```bash
+cd /home/hx/try/lsm-hook-analysis-realtime
+bash scripts/redeploy_ignore_mock.sh
+```
+
+### 2.2 上报 Mock Round
+
+测试模式：`is_mock=true` 的 round 也会分析并上报。
+
+```bash
+cd /home/hx/try/lsm-hook-analysis-realtime
+bash scripts/redeploy_push_mock.sh
+```
+
+脚本执行完后，systemd 服务名是：
+
+```text
+lha_realtime.service
+```
+
+## 3. 常用运维命令
+
+查看服务状态：
+
+```bash
+systemctl status lha_realtime.service
+```
+
+查看 systemd 实时日志：
+
+```bash
+journalctl -u lha_realtime.service -f
+```
+
+重启服务：
+
+```bash
+sudo systemctl restart lha_realtime.service
+```
+
+停止服务：
+
+```bash
+sudo systemctl stop lha_realtime.service
+```
+
+查看本地日志：
+
+```bash
+cd /home/hx/try/lsm-hook-analysis-realtime
+tail -f logs/receiver.log
+tail -f logs/pipeline.log
+tail -f logs/analyzer.log
+```
+
+## 4. 本地调试
+
+如果只是临时调试，不想注册 systemd 服务，可以前台启动：
 
 ```bash
 cd /home/hx/try/lsm-hook-analysis-realtime
 python3 -m pip install -r requirements.txt
-```
-
-前台测试启动，适合调试时直接看日志：
-
-```bash
-cd /home/hx/try/lsm-hook-analysis-realtime
 python3 -m lha_realtime.receiver
 ```
 
-也可以继续使用兼容入口：
+也可以使用兼容入口：
 
 ```bash
 cd /home/hx/try/lsm-hook-analysis-realtime
@@ -41,17 +109,11 @@ mkdir -p logs
 nohup python3 receiver.py > logs/service.out 2>&1 &
 ```
 
-查看本地日志：
+## 5. 手动 Systemd 部署
 
-```bash
-tail -f logs/receiver.log
-tail -f logs/pipeline.log
-tail -f logs/analyzer.log
-```
+通常直接用第 2 节的一键脚本即可。需要手动部署时，可以按下面步骤操作。
 
-## systemd 部署
-
-建议服务器长期运行时使用 systemd：
+### 5.1 写入 Service 文件
 
 ```bash
 sudo tee /etc/systemd/system/lha_realtime.service >/dev/null <<'EOF'
@@ -76,46 +138,14 @@ WantedBy=multi-user.target
 EOF
 ```
 
-启动并设置开机自启：
+### 5.2 启动 Service
 
 ```bash
 sudo systemctl daemon-reload
 sudo systemctl enable --now lha_realtime.service
 ```
 
-查看状态和实时日志：
-
-```bash
-systemctl status lha_realtime.service
-journalctl -u lha_realtime.service -f
-```
-
-重启或停止：
-
-```bash
-sudo systemctl restart lha_realtime.service
-sudo systemctl stop lha_realtime.service
-```
-
-## 删除已有服务并重新部署
-
-项目提供两个一键重部署脚本，都会先删除已有 `lha_realtime.service`，再重新写入 service 文件并启动。
-
-不处理 mock round（默认，`is_mock=true` 只分析不上报）：
-
-```bash
-cd /home/hx/try/lsm-hook-analysis-realtime
-bash scripts/redeploy_ignore_mock.sh
-```
-
-处理 mock round（设置 `LHA_PUSH_MOCK_REPORTS=1`，`is_mock=true` 也会上报）：
-
-```bash
-cd /home/hx/try/lsm-hook-analysis-realtime
-bash scripts/redeploy_push_mock.sh
-```
-
-如果之前已经创建过 `lha_realtime.service`，可以先彻底删除旧服务：
+### 5.3 删除旧 Service
 
 ```bash
 sudo systemctl disable --now lha_realtime.service
@@ -124,49 +154,37 @@ sudo systemctl daemon-reload
 sudo systemctl reset-failed lha_realtime.service
 ```
 
-确认旧服务已不存在：
+## 6. 配置项
 
-```bash
-systemctl status lha_realtime.service
-```
+常用环境变量：
 
-然后重新执行上面的 systemd 部署步骤，重新写入 `/etc/systemd/system/lha_realtime.service`，再启动：
+- `LHA_SERVER_URL`：Socket.IO 服务地址，默认 `ws://8.152.192.7:15100`
+- `LHA_SOCKETIO_PATH`：Socket.IO path，默认 `/wss`
+- `LHA_NAMESPACE`：Socket.IO namespace，默认 `/wss/monitor`
+- `LHA_INPUT_DIR`：round 输入和分析输出目录，默认 `./input`
+- `LHA_DB_PATH`：SQLite 状态库路径，默认 `./state/realtime.db`
+- `LHA_KERNEL_REPORT_URL`：报告上报接口，默认 `$LHA_API_BASE_URL/api/rounds/detection/kernel`
+- `LHA_PUSH_MOCK_REPORTS`：是否上报 `is_mock=true` 的 round，默认 `0`，设置 `1` 后上报
+- `LHA_ANALYZER_WORKERS`：分析 worker 数量，默认 `1`
+- `LHA_MAX_ATTEMPTS`：失败重试次数，默认 `3`
 
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now lha_realtime.service
-```
+## 7. 重复 Round 的处理
 
-Useful environment variables:
-
-- `LHA_SERVER_URL` defaults to `ws://8.152.192.7:15100`
-- `LHA_SOCKETIO_PATH` defaults to `/wss`
-- `LHA_NAMESPACE` defaults to `/wss/monitor`
-- `LHA_INPUT_DIR` defaults to `./input`
-- `LHA_DB_PATH` defaults to `./state/realtime.db`
-- `LHA_KERNEL_REPORT_URL` defaults to `$LHA_API_BASE_URL/api/rounds/detection/kernel`
-- `LHA_PUSH_MOCK_REPORTS` defaults to `0`; set to `1` to push reports for `is_mock=true` rounds
-- `LHA_ANALYZER_WORKERS` defaults to `1`
-- `LHA_MAX_ATTEMPTS` defaults to `3`
-
-## Duplicate Round Behavior
-
-测试阶段如果再次收到已经处理过的 `round_id`，服务会把它作为新的 generation：
+测试阶段可能重复收到同一个 `round_id`。当前策略是把它当成新的 round：
 
 - 取消旧的未完成分析任务。
-- 清理 `input/<round_id>/` 下旧的 round 输入、内核 JSONL、分析报告和上报 marker。
-- 重新等待 `round_end` 与 `round_kernel`，再分析并上报。
+- 清理 `input/<round_id>/` 下旧的输入、内核 JSONL、分析报告和上报 marker。
+- 重新等待 `round_end` 和 `round_kernel`。
+- 两者都到达后重新分析，并按配置决定是否上报。
 
-同一 generation 内，`round_end` 和 `round_kernel` 可以任意先后到达；只有两者都到达后才会触发分析。
-
-## Tests
+## 8. 运行测试
 
 ```bash
 cd /home/hx/try/lsm-hook-analysis-realtime
 python3 -m unittest discover -s tests -v
 ```
 
-## Project Layout
+## 9. 项目结构
 
 ```text
 lsm-hook-analysis-realtime/
@@ -177,6 +195,9 @@ lsm-hook-analysis-realtime/
 │   ├── pipeline.py        # inbox 消费、落盘、分析 worker、重复 round 处理
 │   ├── receiver.py        # Socket.IO 接收端
 │   └── state.py           # SQLite inbox、round state、analysis jobs
+├── scripts/
+│   ├── redeploy_ignore_mock.sh
+│   └── redeploy_push_mock.sh
 ├── tests/
 │   └── test_realtime_pipeline.py
 ├── receiver.py            # 兼容启动入口
