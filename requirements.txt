@@ -1,0 +1,2 @@
+# Socket.IO client, including websocket-client for websocket transport.
+python-socketio[client]>=5.11

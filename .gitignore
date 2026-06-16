@@ -1,0 +1,11 @@
+__pycache__/
+logs/
+state/
+input/
+*.pyc
+*.pyo
+*.pyd
+*.db
+*.db-shm
+*.db-wal
+.pytest_cache/
