@@ -7,6 +7,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from lha_realtime.config import Settings
 from lha_realtime.pipeline import RealtimePipeline
@@ -35,7 +36,7 @@ class RealtimePipelineTest(unittest.TestCase):
         self.store.close()
         self.tmp.cleanup()
 
-    def round_end(self, round_id: str, score: float = 1.0, bad_ir: bool = False) -> dict:
+    def round_end(self, round_id: str, score: float = 1.0, bad_ir: bool = False, is_mock: bool = False) -> dict:
         return {
             "push_type": "round_end",
             "round_id": round_id,
@@ -44,15 +45,17 @@ class RealtimePipelineTest(unittest.TestCase):
             "time_end": "2026-06-16 10:00:01+0800",
             "action_json": "[]",
             "ir_json": "{" if bad_ir else json.dumps({"level2": {"policies": []}}),
+            "is_mock": is_mock,
         }
 
-    def round_kernel(self, round_id: str) -> dict:
+    def round_kernel(self, round_id: str, is_mock: bool = False) -> dict:
         return {
             "push_type": "round_kernel",
             "round_id": round_id,
             "kernel_syscall_seq": str(self.kernel_syscalls),
             "kernel_lsm_hook_result": str(self.kernel_lsm),
             "kernel_resource_facts": json.dumps({"resource_facts": []}),
+            "is_mock": is_mock,
         }
 
     def drain_ingest(self) -> None:
@@ -131,6 +134,41 @@ class RealtimePipelineTest(unittest.TestCase):
 
         self.assertTrue((self.settings.input_dir / "recover" / "round_end.json").is_file())
         self.assertEqual(self.store.get_round("recover")["status"], "receiving")
+
+    def test_mock_round_push_is_disabled_by_default(self) -> None:
+        self.store.enqueue_message(self.round_end("mock-skip", is_mock=True))
+        self.store.enqueue_message(self.round_kernel("mock-skip", is_mock=True))
+        self.drain_ingest()
+
+        with patch("lha_realtime.analyzer.push_and_mark_report", return_value=True) as push:
+            self.drain_analysis()
+
+        push.assert_not_called()
+
+    def test_mock_round_push_can_be_enabled(self) -> None:
+        settings = Settings(
+            input_dir=self.root / "input-mock-push",
+            log_dir=self.root / "logs-mock-push",
+            state_dir=self.root / "state-mock-push",
+            db_path=self.root / "state-mock-push" / "realtime.db",
+            max_attempts=2,
+            push_mock_reports=True,
+        )
+        store = StateStore(settings=settings)
+        pipeline = RealtimePipeline(store=store, settings=settings, push_reports=True)
+        try:
+            store.enqueue_message(self.round_end("mock-push", is_mock=True))
+            store.enqueue_message(self.round_kernel("mock-push", is_mock=True))
+            while pipeline.ingest_once(limit=100):
+                pass
+
+            with patch("lha_realtime.analyzer.push_and_mark_report", return_value=True) as push:
+                while pipeline.analyze_once():
+                    pass
+
+            push.assert_called_once()
+        finally:
+            store.close()
 
 
 if __name__ == "__main__":

@@ -163,9 +163,13 @@ class RealtimePipeline:
                 raise RuntimeError(f"job superseded before report push: {round_id} generation={generation}")
 
             self.store.mark_job_reporting(job_id)
-            if self.push_reports and not analyzer.is_mock_round(round_dir):
+            is_mock = analyzer.is_mock_round(round_dir)
+            should_push = self.push_reports and (self.settings.push_mock_reports or not is_mock)
+            if should_push:
                 if not analyzer.push_and_mark_report(round_dir, result["round_id"], report_path):
                     raise RuntimeError(f"report push failed for round {result['round_id']}")
+            elif self.push_reports and is_mock:
+                log.info("[%s] mock round，跳过上报；设置 LHA_PUSH_MOCK_REPORTS=1 可开启", round_id)
             self.store.complete_job(job_id)
             log.info("[%s] round generation=%s analysis job done", round_id, generation)
         except Exception as exc:  # noqa: BLE001 - worker must keep running.

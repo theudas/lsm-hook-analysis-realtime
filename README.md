@@ -12,16 +12,129 @@ SQLite 只保存控制数据：消息状态、round generation、文件路径、
 
 ## Run
 
+首次运行先安装依赖：
+
 ```bash
 cd /home/hx/try/lsm-hook-analysis-realtime
 python3 -m pip install -r requirements.txt
+```
+
+前台测试启动，适合调试时直接看日志：
+
+```bash
+cd /home/hx/try/lsm-hook-analysis-realtime
 python3 -m lha_realtime.receiver
 ```
 
 也可以继续使用兼容入口：
 
 ```bash
+cd /home/hx/try/lsm-hook-analysis-realtime
 python3 receiver.py
+```
+
+临时后台启动：
+
+```bash
+cd /home/hx/try/lsm-hook-analysis-realtime
+mkdir -p logs
+nohup python3 receiver.py > logs/service.out 2>&1 &
+```
+
+查看本地日志：
+
+```bash
+tail -f logs/receiver.log
+tail -f logs/pipeline.log
+tail -f logs/analyzer.log
+```
+
+## systemd 部署
+
+建议服务器长期运行时使用 systemd：
+
+```bash
+sudo tee /etc/systemd/system/lha_realtime.service >/dev/null <<'EOF'
+[Unit]
+Description=LHA Realtime Socket.IO Receiver and Analyzer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/hx/try/lsm-hook-analysis-realtime
+ExecStart=/usr/bin/python3 /home/hx/try/lsm-hook-analysis-realtime/receiver.py
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+# 测试阶段如需上报 is_mock=true 的 round，可取消下一行注释。
+# Environment=LHA_PUSH_MOCK_REPORTS=1
+
+[Install]
+WantedBy=multi-user.target
+EOF
+```
+
+启动并设置开机自启：
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now lha_realtime.service
+```
+
+查看状态和实时日志：
+
+```bash
+systemctl status lha_realtime.service
+journalctl -u lha_realtime.service -f
+```
+
+重启或停止：
+
+```bash
+sudo systemctl restart lha_realtime.service
+sudo systemctl stop lha_realtime.service
+```
+
+## 删除已有服务并重新部署
+
+项目提供两个一键重部署脚本，都会先删除已有 `lha_realtime.service`，再重新写入 service 文件并启动。
+
+不处理 mock round（默认，`is_mock=true` 只分析不上报）：
+
+```bash
+cd /home/hx/try/lsm-hook-analysis-realtime
+bash scripts/redeploy_ignore_mock.sh
+```
+
+处理 mock round（设置 `LHA_PUSH_MOCK_REPORTS=1`，`is_mock=true` 也会上报）：
+
+```bash
+cd /home/hx/try/lsm-hook-analysis-realtime
+bash scripts/redeploy_push_mock.sh
+```
+
+如果之前已经创建过 `lha_realtime.service`，可以先彻底删除旧服务：
+
+```bash
+sudo systemctl disable --now lha_realtime.service
+sudo rm -f /etc/systemd/system/lha_realtime.service
+sudo systemctl daemon-reload
+sudo systemctl reset-failed lha_realtime.service
+```
+
+确认旧服务已不存在：
+
+```bash
+systemctl status lha_realtime.service
+```
+
+然后重新执行上面的 systemd 部署步骤，重新写入 `/etc/systemd/system/lha_realtime.service`，再启动：
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now lha_realtime.service
 ```
 
 Useful environment variables:
@@ -32,6 +145,7 @@ Useful environment variables:
 - `LHA_INPUT_DIR` defaults to `./input`
 - `LHA_DB_PATH` defaults to `./state/realtime.db`
 - `LHA_KERNEL_REPORT_URL` defaults to `$LHA_API_BASE_URL/api/rounds/detection/kernel`
+- `LHA_PUSH_MOCK_REPORTS` defaults to `0`; set to `1` to push reports for `is_mock=true` rounds
 - `LHA_ANALYZER_WORKERS` defaults to `1`
 - `LHA_MAX_ATTEMPTS` defaults to `3`
 
