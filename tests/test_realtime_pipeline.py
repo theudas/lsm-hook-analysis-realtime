@@ -9,9 +9,37 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from lha_realtime.analyzer import matches_file_identifier
 from lha_realtime.config import Settings
 from lha_realtime.pipeline import RealtimePipeline
 from lha_realtime.state import StateStore
+
+
+class FileIdentifierMatcherTest(unittest.TestCase):
+    def test_exact_path_only_matches_same_path(self) -> None:
+        self.assertTrue(matches_file_identifier("/tmp/a.txt", "/tmp/a.txt"))
+        self.assertFalse(matches_file_identifier("/tmp/b.txt", "/tmp/a.txt"))
+
+    def test_single_star_does_not_cross_path_segments(self) -> None:
+        self.assertTrue(matches_file_identifier("/workspace/a.txt", "/workspace/*"))
+        self.assertFalse(matches_file_identifier("/workspace/a/b.txt", "/workspace/*"))
+
+    def test_double_star_crosses_path_segments(self) -> None:
+        self.assertTrue(matches_file_identifier("/workspace/a.py", "/workspace/**/*.py"))
+        self.assertTrue(matches_file_identifier("/workspace/a/b.py", "/workspace/**/*.py"))
+
+    def test_file_identifier_star_is_path_glob(self) -> None:
+        self.assertTrue(matches_file_identifier("/tmp/anything", "/tmp/*"))
+        self.assertFalse(matches_file_identifier("/tmp/nested/anything", "/tmp/*"))
+
+    def test_regex_uses_fullmatch(self) -> None:
+        pattern = r"^/tmp/[a-zA-Z0-9]+\.txt$"
+        self.assertTrue(matches_file_identifier("/tmp/abc123.txt", pattern))
+        self.assertFalse(matches_file_identifier("/tmp/a/b.txt", pattern))
+        self.assertFalse(matches_file_identifier("/tmp/abc123.txt.bak", pattern))
+
+    def test_invalid_regex_does_not_allow(self) -> None:
+        self.assertFalse(matches_file_identifier("/tmp/a.txt", r"(/tmp/[a-z]+\.txt"))
 
 
 class RealtimePipelineTest(unittest.TestCase):
@@ -57,6 +85,32 @@ class RealtimePipelineTest(unittest.TestCase):
             "kernel_resource_facts": json.dumps({"resource_facts": []}),
             "is_mock": is_mock,
         }
+
+    def write_lsm_hooks(self, *paths: str) -> None:
+        rows = []
+        for index, path in enumerate(paths, start=1):
+            rows.append(
+                {
+                    "event_id": index,
+                    "hook_name": "file_open",
+                    "result": "allow",
+                    "return_value": 0,
+                    "pid": 1000 + index,
+                    "tid": 1000 + index,
+                    "timestamp_mono_ns": index,
+                    "path": path,
+                    "fd": None,
+                    "category": "file",
+                    "resource_role": "normal_resource",
+                    "tool_call_id": f"call-{index}",
+                    "tool_name": "cmd_executor__exec_command",
+                    "related_event_id": None,
+                }
+            )
+        self.kernel_lsm.write_text(
+            "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n",
+            encoding="utf-8",
+        )
 
     def drain_ingest(self) -> None:
         while self.pipeline.ingest_once(limit=100):
@@ -123,6 +177,47 @@ class RealtimePipelineTest(unittest.TestCase):
         self.assertEqual(self.store.get_round("bad")["status"], "queued")
         self.assertTrue(self.pipeline.analyze_once())
         self.assertEqual(self.store.get_round("bad")["status"], "analysis_failed")
+
+    def test_analysis_uses_new_file_identifier_matching(self) -> None:
+        self.write_lsm_hooks(
+            "/tmp/exact.txt",
+            "/workspace/a.py",
+            "/workspace/a/b.py",
+            "/workspace/a/b.txt",
+            "/tmp/abc123.txt",
+            "/tmp/abc123.txt.bak",
+        )
+        ir = {
+            "policies": [
+                {
+                    "subject": "shell_exec",
+                    "effect": "allow",
+                    "objects": [
+                        {"type": "file", "identifier": "/tmp/exact.txt", "actions": ["read"]},
+                        {"type": "file", "identifier": "/workspace/**/*.py", "actions": ["read"]},
+                        {"type": "file", "identifier": r"^/tmp/[a-zA-Z0-9]+\.txt$", "actions": ["read"]},
+                    ],
+                }
+            ]
+        }
+        round_end = self.round_end("new-match")
+        round_end["ir_json"] = json.dumps(ir)
+        self.store.enqueue_message(round_end)
+        self.store.enqueue_message(self.round_kernel("new-match"))
+
+        self.drain_ingest()
+        self.drain_analysis()
+
+        violations_path = self.settings.input_dir / "new-match" / "analysis_violations.jsonl"
+        violations = [
+            json.loads(line)
+            for line in violations_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        self.assertEqual(
+            [violation["path"] for violation in violations],
+            ["/workspace/a/b.txt", "/tmp/abc123.txt.bak"],
+        )
 
     def test_pending_inbox_survives_store_reopen(self) -> None:
         self.store.enqueue_message(self.round_end("recover"))

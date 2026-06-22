@@ -9,8 +9,8 @@ one round directory and does not decide whether a round should be skipped.
 from __future__ import annotations
 
 import json
+import re
 import time
-from fnmatch import fnmatch
 from pathlib import Path
 from urllib import error, request
 
@@ -59,13 +59,23 @@ def parse_allowlist(round_end: dict) -> dict:
     """从 ir_json 展开用户态允许集合：文件路径 / 工具。"""
     allowed = {"files": set(), "tools": set(), "file_actions": {}}
     ir = json.loads(round_end.get("ir_json") or "{}")
-    for pol in ir.get("level2", {}).get("policies", []):
+    policies = ir.get("level2", {}).get("policies")
+    if policies is None:
+        policies = ir.get("policies", [])
+    for pol in policies:
         if pol.get("effect") != "allow":
             continue
         for obj in pol.get("objects", []):
             if obj.get("type") == "file":
-                allowed["files"].add(obj["identifier"])
-                allowed["file_actions"][obj["identifier"]] = obj.get("actions", [])
+                identifier = obj.get("identifier")
+                if not identifier:
+                    log.warning("忽略空 file identifier policy=%s", pol)
+                    continue
+                allowed["files"].add(identifier)
+                actions = allowed["file_actions"].setdefault(identifier, [])
+                for action in obj.get("actions", []):
+                    if action not in actions:
+                        actions.append(action)
             elif obj.get("type") == "tool":
                 allowed["tools"].add(obj["identifier"])
     return allowed
@@ -162,15 +172,86 @@ def extract_kernel_file_ops(lsm: list, syscalls: list) -> list:
     return ops
 
 
+REGEX_HINTS = ("^", "$", "+", "|", "(", ")", "{", "}", "\\", ".*")
+GLOB_HINTS = ("*", "?", "[")
+
+
+def is_regex_pattern(identifier: str) -> bool:
+    """Best-effort inference because IR identifiers do not carry pattern type."""
+    return any(hint in identifier for hint in REGEX_HINTS)
+
+
+def glob_to_regex(pattern: str) -> str:
+    """Translate IR file globs so * stays within one path segment and ** spans dirs."""
+    out = ["^"]
+    index = 0
+    while index < len(pattern):
+        char = pattern[index]
+        if char == "*":
+            if index + 1 < len(pattern) and pattern[index + 1] == "*":
+                index += 2
+                if index < len(pattern) and pattern[index] == "/":
+                    out.append("(?:.*/)?")
+                    index += 1
+                else:
+                    out.append(".*")
+                continue
+            out.append("[^/]*")
+            index += 1
+            continue
+        if char == "?":
+            out.append("[^/]")
+            index += 1
+            continue
+        if char == "[":
+            end = index + 1
+            if end < len(pattern) and pattern[end] in ("!", "^"):
+                end += 1
+            if end < len(pattern) and pattern[end] == "]":
+                end += 1
+            while end < len(pattern) and pattern[end] != "]":
+                end += 1
+            if end >= len(pattern):
+                out.append(re.escape(char))
+                index += 1
+                continue
+            content = pattern[index + 1 : end]
+            if content.startswith("!"):
+                content = "^" + content[1:]
+            elif content.startswith("^"):
+                content = "\\" + content
+            out.append("[" + content.replace("\\", "\\\\") + "]")
+            index = end + 1
+            continue
+        out.append(re.escape(char))
+        index += 1
+    out.append("$")
+    return "".join(out)
+
+
+def matches_file_identifier(path: str | None, identifier: str | None) -> bool:
+    if path is None or not identifier:
+        if not identifier:
+            log.warning("空 file identifier 不放行 path=%s", path)
+        return False
+    if path == identifier:
+        return True
+    if is_regex_pattern(identifier):
+        try:
+            return re.fullmatch(identifier, path) is not None
+        except re.error:
+            log.warning("非法 file regex identifier 不放行 path=%s identifier=%s", path, identifier)
+            return False
+    if any(ch in identifier for ch in GLOB_HINTS):
+        return re.fullmatch(glob_to_regex(identifier), path) is not None
+    return False
+
+
 def is_allowed(path: str | None, allowed_files: set) -> bool:
     if path is None:
         return False
-    if path in allowed_files:
-        return True
     for pattern in allowed_files:
-        if pattern.endswith("/") and path.startswith(pattern):
-            return True
-        if any(ch in pattern for ch in "*?[") and fnmatch(path, pattern):
+        if matches_file_identifier(path, pattern):
             return True
     return False
 
