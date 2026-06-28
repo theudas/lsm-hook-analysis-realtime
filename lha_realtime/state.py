@@ -44,6 +44,10 @@ class StateStore:
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
+        # WAL + NORMAL: skip the per-commit fsync (synced at checkpoint instead).
+        # Never corrupts the DB; a power loss / OS crash may drop only the last
+        # few committed transactions. Safe and faster for this realtime workload.
+        self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self.init_db()
 

@@ -49,8 +49,8 @@ class Settings:
     push_mock_reports: bool = _bool_env("LHA_PUSH_MOCK_REPORTS", False)
 
     analyzer_workers: int = _int_env("LHA_ANALYZER_WORKERS", 1)
-    ingest_poll_interval: float = float(os.environ.get("LHA_INGEST_POLL_INTERVAL", "0.2"))
-    analysis_poll_interval: float = float(os.environ.get("LHA_ANALYSIS_POLL_INTERVAL", "0.5"))
+    ingest_poll_interval: float = float(os.environ.get("LHA_INGEST_POLL_INTERVAL", "0.02"))
+    analysis_poll_interval: float = float(os.environ.get("LHA_ANALYSIS_POLL_INTERVAL", "0.02"))
     retry_backoff_seconds: int = _int_env("LHA_RETRY_BACKOFF_SECONDS", 10)
     max_attempts: int = _int_env("LHA_MAX_ATTEMPTS", 3)
 
