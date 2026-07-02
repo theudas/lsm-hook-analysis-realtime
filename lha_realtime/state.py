@@ -23,6 +23,14 @@ ROUND_RESET_STATUSES = {
     "report_failed",
     "cancelled",
 }
+# Statuses where a round has settled: a replayed required input should re-run the
+# whole pipeline from the inputs already persisted on disk.
+ROUND_TERMINAL_STATUSES = {
+    "done",
+    "analysis_failed",
+    "report_failed",
+    "cancelled",
+}
 FINAL_JOB_STATUSES = {"done", "failed", "cancelled"}
 
 
@@ -241,15 +249,18 @@ class StateStore:
 
             generation = int(row["generation"])
             # The new-generation decision is owned entirely by the caller
-            # (_should_start_new_generation), which considers push_type so that a lone
-            # late round_end never churns a finished round. Do not re-derive it here.
+            # (_should_start_new_generation). A re-run (replay of a settled round)
+            # bumps the generation for job identity and supersedes any in-flight job,
+            # but intentionally KEEPS the persisted inputs and their flags so the round
+            # is immediately complete again from disk — a replay of even a single
+            # required message re-runs the full pipeline on the existing inputs.
             if force_new_generation:
                 generation += 1
                 self._conn.execute(
                     """
                     UPDATE analysis_jobs
                     SET status = 'cancelled',
-                        last_error = 'superseded by duplicate round',
+                        last_error = 'superseded by re-run',
                         updated_at = ?
                     WHERE round_id = ?
                       AND status NOT IN ('done', 'failed', 'cancelled')
@@ -262,14 +273,6 @@ class StateStore:
                     SET generation = ?,
                         status = 'receiving',
                         round_dir = ?,
-                        has_round_end = 0,
-                        has_round_kernel = 0,
-                        has_ir = 0,
-                        round_end_path = NULL,
-                        round_kernel_path = NULL,
-                        ir_path = NULL,
-                        syscall_path = NULL,
-                        lsm_path = NULL,
                         analysis_job_id = NULL,
                         last_error = NULL,
                         updated_at = ?
@@ -277,7 +280,7 @@ class StateStore:
                     """,
                     (generation, str(round_dir), timestamp, round_id),
                 )
-                return generation, True
+                return generation, False
 
             return generation, False
 

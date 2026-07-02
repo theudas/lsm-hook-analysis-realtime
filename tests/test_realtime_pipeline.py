@@ -164,28 +164,55 @@ class RealtimePipelineTest(unittest.TestCase):
         round_end = json.loads((round_dir / "round_end.json").read_text(encoding="utf-8"))
         self.assertEqual(round_end["overall_score"], 2.0)
 
-    def test_genuine_rerun_is_driven_by_kernel_and_ir(self) -> None:
-        self.store.enqueue_message(self.round_end("dup", score=1.0))
-        self.store.enqueue_message(self.round_kernel("dup"))
+    def test_replaying_one_required_message_reruns_using_persisted_inputs(self) -> None:
+        # A completed round re-runs the full pipeline from its persisted inputs even when
+        # only a single required message (here: kernel) is replayed.
+        self.write_lsm_hooks("/etc/passwd")
+        self.store.enqueue_message(self.round_end("r", ir=False))
+        self.store.enqueue_message(self.round_kernel("r"))
+        self.store.enqueue_message(self.round_ir_ready("r"))
         self.drain_ingest()
         self.drain_analysis()
-        self.assertEqual(self.store.get_round("dup")["status"], "done")
+        round_dir = self.settings.input_dir / "r"
+        self.assertEqual(self.store.get_round("r")["status"], "done")
+        self.assertEqual(self.store.get_round("r")["generation"], 1)
 
-        # A required input (kernel) arriving after the round finished starts a fresh
-        # generation and clears old outputs.
-        round_dir = self.settings.input_dir / "dup"
-        self.store.enqueue_message(self.round_kernel("dup"))
-        self.drain_ingest()
-        self.assertEqual(self.store.get_round("dup")["generation"], 2)
-        self.assertEqual(self.store.get_round("dup")["status"], "receiving")
-        self.assertFalse((round_dir / "analysis_report.md").exists())
-
-        # The re-run completes once IR arrives again.
-        self.store.enqueue_message(self.round_ir_ready("dup"))
+        # Replay ONLY the kernel message — the round must fully re-run (new generation,
+        # fresh report) reusing the IR + inputs already on disk.
+        self.store.enqueue_message(self.round_kernel("r"))
         self.drain_ingest()
         self.drain_analysis()
-        self.assertEqual(self.store.get_round("dup")["status"], "done")
+        self.assertEqual(self.store.get_round("r")["status"], "done")
+        self.assertEqual(self.store.get_round("r")["generation"], 2)
         self.assertTrue((round_dir / "analysis_report.md").is_file())
+
+    def test_replayed_round_reruns_full_pipeline_and_repushes(self) -> None:
+        # Every replay of a round runs the complete analyze + push pipeline again.
+        pipeline = RealtimePipeline(store=self.store, settings=self.settings, push_reports=True)
+
+        def feed_full_round(round_id: str) -> None:
+            self.store.enqueue_message(self.round_end(round_id))
+            self.store.enqueue_message(self.round_kernel(round_id))
+            self.store.enqueue_message(self.round_ir_ready(round_id))
+
+        def drain() -> None:
+            while pipeline.ingest_once(limit=100):
+                pass
+            while pipeline.analyze_once():
+                pass
+
+        with patch("lha_realtime.analyzer.push_and_mark_report", return_value=True) as push:
+            feed_full_round("replay")
+            drain()
+            self.assertEqual(self.store.get_round("replay")["status"], "done")
+            first_pushes = push.call_count
+            self.assertGreaterEqual(first_pushes, 1)
+
+            feed_full_round("replay")
+            drain()
+            self.assertEqual(self.store.get_round("replay")["status"], "done")
+            self.assertGreater(push.call_count, first_pushes)
+            self.assertGreater(self.store.get_round("replay")["generation"], 1)
 
     def test_ir_ready_after_kernel_unblocks_analysis(self) -> None:
         # Reproduces the production bug: round_end arrives with empty ir, kernel arrives,

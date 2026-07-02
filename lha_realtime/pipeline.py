@@ -13,7 +13,7 @@ from typing import Any
 from . import analyzer
 from .config import SETTINGS, Settings, ensure_runtime_dirs
 from .logging_utils import setup_logging
-from .state import ROUND_RESET_STATUSES, StateStore, json_size, now_iso
+from .state import ROUND_TERMINAL_STATUSES, StateStore, json_size, now_iso
 
 
 INPUT_FILES = {
@@ -202,7 +202,7 @@ class RealtimePipeline:
         force_new = self._should_start_new_generation(str(round_id), push_type, round_dir)
         generation, should_clear = self.store.begin_round_for_message(str(round_id), round_dir, force_new_generation=force_new)
         if should_clear:
-            log.info("[%s] duplicate round detected, clearing old files generation=%s", round_id, generation)
+            log.info("[%s] orphan artifacts on disk with no state, clearing generation=%s", round_id, generation)
             clear_round_dir(round_dir, self.settings)
         round_dir.mkdir(parents=True, exist_ok=True)
 
@@ -270,14 +270,14 @@ class RealtimePipeline:
         state = self.store.get_round(round_id)
         if state is None:
             return has_round_artifacts(round_dir)
-        # 只有必需输入（IR / kernel）能开启新一轮；round_end 等元数据不触发，避免拆散输入。
+        # Only a required input (IR / kernel) can start a new run; round_end and other
+        # metadata never do (that would double-push on a normal late round_end).
         if push_type not in {"round_ir_ready", "round_kernel"}:
             return False
-        # 轮次已到终态后又收到必需输入 → 视为真正的重跑。
-        if state["status"] in ROUND_RESET_STATUSES:
-            return True
-        # 接收/分析途中重复到达的必需输入原地覆盖，不 bump generation。
-        return False
+        # A settled round that receives a required input again is a replay/re-run: bump
+        # the generation and re-run the whole pipeline on the persisted inputs. While a
+        # round is still receiving or in-flight, duplicates overwrite in place instead.
+        return state["status"] in ROUND_TERMINAL_STATUSES
 
 
 def main() -> None:
