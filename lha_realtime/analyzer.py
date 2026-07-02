@@ -55,10 +55,26 @@ def load_jsonl(path: Path) -> list:
     return rows
 
 
-def parse_allowlist(round_end: dict) -> dict:
-    """从 ir_json 展开用户态允许集合：文件路径 / 工具。"""
+def load_ir_source(round_dir: Path, round_end: dict | None = None) -> dict:
+    """IR 优先取独立的 ir.json（round_ir_ready）；否则回退 round_end.json 的 ir_json（旧上游）。"""
+    ir_path = round_dir / "ir.json"
+    if ir_path.is_file():
+        payload = load_json_file(ir_path)
+        if payload.get("ir_json"):
+            return payload
+        log.warning("ir.json 存在但 ir_json 为空 path=%s", ir_path)
+    if round_end is None:
+        round_end = load_json_file(round_dir / "round_end.json")
+    return round_end if round_end.get("ir_json") else {}
+
+
+def parse_allowlist(ir_source: dict) -> dict:
+    """从 ir_json 展开用户态允许集合：文件路径 / 工具。
+
+    ir_source 可以是 ir.json（round_ir_ready）或 round_end.json 的 payload，两者都含 ir_json 键。
+    """
     allowed = {"files": set(), "tools": set(), "file_actions": {}}
-    ir = json.loads(round_end.get("ir_json") or "{}")
+    ir = json.loads(ir_source.get("ir_json") or "{}")
     policies = ir.get("level2", {}).get("policies")
     if policies is None:
         policies = ir.get("policies", [])
@@ -298,6 +314,7 @@ def analyze_round(round_dir: Path) -> dict:
     input_files = {
         "round_end": round_dir / "round_end.json",
         "round_kernel": round_dir / "round_kernel.json",
+        "ir": round_dir / "ir.json",
         "lsm": round_dir / "kernel_lsm_hook_result.jsonl",
         "syscalls": round_dir / "kernel_syscall_seq.jsonl",
     }
@@ -313,7 +330,7 @@ def analyze_round(round_dir: Path) -> dict:
     lsm = load_jsonl(input_files["lsm"])
     syscalls = load_jsonl(input_files["syscalls"])
 
-    allowed = parse_allowlist(round_end)
+    allowed = parse_allowlist(load_ir_source(round_dir, round_end))
     user_actions = parse_user_actions(round_end)
     resource_facts = parse_resource_facts(round_kernel)
     kernel_ops = extract_kernel_file_ops(lsm, syscalls)
@@ -464,7 +481,7 @@ def write_outputs(round_dir: Path, result: dict) -> tuple[Path, Path]:
 
 def is_mock_round(round_dir: Path) -> bool:
     """mock round 只用于本地测试，不应推送到正式展示接口。"""
-    for name in ("round_end.json", "round_kernel.json"):
+    for name in ("round_end.json", "round_kernel.json", "ir.json"):
         path = round_dir / name
         if not path.is_file():
             continue

@@ -76,6 +76,13 @@ def on_push(data):
             data.get("kernel_lsm_hook_result"),
             safe_len(data.get("kernel_resource_facts")),
         )
+    elif push_type == "round_ir_ready":
+        log.info(
+            "[%s] round_ir_ready 摘要 is_mock=%s ir_json_len=%d",
+            round_id,
+            data.get("is_mock"),
+            safe_len(data.get("ir_json")),
+        )
     else:
         log.info("[%s] push_type=%s 将只记录后由 pipeline 忽略", round_id, push_type)
 

@@ -84,8 +84,10 @@ class StateStore:
                     round_dir TEXT NOT NULL,
                     has_round_end INTEGER NOT NULL DEFAULT 0,
                     has_round_kernel INTEGER NOT NULL DEFAULT 0,
+                    has_ir INTEGER NOT NULL DEFAULT 0,
                     round_end_path TEXT,
                     round_kernel_path TEXT,
+                    ir_path TEXT,
                     syscall_path TEXT,
                     lsm_path TEXT,
                     analysis_job_id INTEGER,
@@ -111,6 +113,27 @@ class StateStore:
                     ON analysis_jobs(status, id);
                 """
             )
+            self._migrate_round_states_columns()
+
+    def _migrate_round_states_columns(self) -> None:
+        """Add columns introduced after the original schema (idempotent).
+
+        CREATE TABLE IF NOT EXISTS never alters an existing table, so databases
+        created before has_ir/ir_path existed need an explicit backfill.
+        """
+        existing = {
+            row["name"]
+            for row in self._conn.execute("PRAGMA table_info(round_states)").fetchall()
+        }
+        additions = {
+            "has_ir": "INTEGER NOT NULL DEFAULT 0",
+            "ir_path": "TEXT",
+        }
+        for column, definition in additions.items():
+            if column not in existing:
+                self._conn.execute(
+                    f"ALTER TABLE round_states ADD COLUMN {column} {definition}"
+                )
 
     def enqueue_message(self, payload: dict[str, Any]) -> int:
         timestamp = now_iso()
@@ -217,7 +240,10 @@ class StateStore:
                 return 1, force_new_generation
 
             generation = int(row["generation"])
-            if force_new_generation or row["status"] in ROUND_RESET_STATUSES:
+            # The new-generation decision is owned entirely by the caller
+            # (_should_start_new_generation), which considers push_type so that a lone
+            # late round_end never churns a finished round. Do not re-derive it here.
+            if force_new_generation:
                 generation += 1
                 self._conn.execute(
                     """
@@ -238,8 +264,10 @@ class StateStore:
                         round_dir = ?,
                         has_round_end = 0,
                         has_round_kernel = 0,
+                        has_ir = 0,
                         round_end_path = NULL,
                         round_kernel_path = NULL,
+                        ir_path = NULL,
                         syscall_path = NULL,
                         lsm_path = NULL,
                         analysis_job_id = NULL,
@@ -262,7 +290,7 @@ class StateStore:
         syscall_path: Path | None = None,
         lsm_path: Path | None = None,
     ) -> dict[str, Any]:
-        if input_kind not in {"round_end", "round_kernel"}:
+        if input_kind not in {"round_end", "round_kernel", "round_ir"}:
             raise ValueError(f"unsupported input_kind: {input_kind}")
 
         timestamp = now_iso()
@@ -273,6 +301,18 @@ class StateStore:
                     UPDATE round_states
                     SET has_round_end = 1,
                         round_end_path = ?,
+                        updated_at = ?
+                    WHERE round_id = ?
+                      AND generation = ?
+                    """,
+                    (str(file_path), timestamp, round_id, generation),
+                )
+            elif input_kind == "round_ir":
+                self._conn.execute(
+                    """
+                    UPDATE round_states
+                    SET has_ir = 1,
+                        ir_path = ?,
                         updated_at = ?
                     WHERE round_id = ?
                       AND generation = ?
@@ -307,7 +347,7 @@ class StateStore:
             ).fetchone()
             if row is None:
                 raise RuntimeError(f"round state disappeared: {round_id} generation={generation}")
-            ready = bool(row["has_round_end"]) and bool(row["has_round_kernel"])
+            ready = bool(row["has_ir"]) and bool(row["has_round_kernel"])
             if ready and row["status"] == "receiving":
                 self._conn.execute(
                     """

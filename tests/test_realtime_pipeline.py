@@ -64,15 +64,27 @@ class RealtimePipelineTest(unittest.TestCase):
         self.store.close()
         self.tmp.cleanup()
 
-    def round_end(self, round_id: str, score: float = 1.0, bad_ir: bool = False, is_mock: bool = False) -> dict:
-        return {
+    def round_end(self, round_id: str, score: float = 1.0, bad_ir: bool = False, is_mock: bool = False, ir: bool = True) -> dict:
+        payload = {
             "push_type": "round_end",
             "round_id": round_id,
             "overall_score": score,
             "time_start": "2026-06-16 10:00:00+0800",
             "time_end": "2026-06-16 10:00:01+0800",
             "action_json": "[]",
-            "ir_json": "{" if bad_ir else json.dumps({"level2": {"policies": []}}),
+            "is_mock": is_mock,
+        }
+        if bad_ir:
+            payload["ir_json"] = "{"
+        elif ir:
+            payload["ir_json"] = json.dumps({"level2": {"policies": []}})
+        return payload
+
+    def round_ir_ready(self, round_id: str, ir: dict | None = None, is_mock: bool = False) -> dict:
+        return {
+            "push_type": "round_ir_ready",
+            "round_id": round_id,
+            "ir_json": json.dumps(ir if ir is not None else {"level2": {"policies": []}}),
             "is_mock": is_mock,
         }
 
@@ -133,26 +145,93 @@ class RealtimePipelineTest(unittest.TestCase):
         self.assertTrue((round_dir / "analysis_report.md").is_file())
         self.assertEqual(self.store.get_round("r1")["status"], "done")
 
-    def test_duplicate_round_clears_old_outputs_and_reanalyzes(self) -> None:
+    def test_second_round_end_updates_metadata_without_new_generation(self) -> None:
         self.store.enqueue_message(self.round_end("dup", score=1.0))
         self.store.enqueue_message(self.round_kernel("dup"))
         self.drain_ingest()
         self.drain_analysis()
-        self.assertTrue((self.settings.input_dir / "dup" / "analysis_report.md").is_file())
+        round_dir = self.settings.input_dir / "dup"
+        self.assertTrue((round_dir / "analysis_report.md").is_file())
+        self.assertEqual(self.store.get_round("dup")["status"], "done")
 
+        # A lone late round_end only refreshes metadata; it must NOT churn the generation
+        # nor wipe the finished report (that was the production churn bug).
         self.store.enqueue_message(self.round_end("dup", score=2.0))
         self.drain_ingest()
-        round_dir = self.settings.input_dir / "dup"
-        self.assertFalse((round_dir / "analysis_report.md").exists())
-        self.assertEqual(self.store.get_round("dup")["generation"], 2)
+        self.assertEqual(self.store.get_round("dup")["generation"], 1)
+        self.assertEqual(self.store.get_round("dup")["status"], "done")
+        self.assertTrue((round_dir / "analysis_report.md").is_file())
+        round_end = json.loads((round_dir / "round_end.json").read_text(encoding="utf-8"))
+        self.assertEqual(round_end["overall_score"], 2.0)
 
+    def test_genuine_rerun_is_driven_by_kernel_and_ir(self) -> None:
+        self.store.enqueue_message(self.round_end("dup", score=1.0))
         self.store.enqueue_message(self.round_kernel("dup"))
         self.drain_ingest()
         self.drain_analysis()
-        round_end = json.loads((round_dir / "round_end.json").read_text(encoding="utf-8"))
-        self.assertEqual(round_end["overall_score"], 2.0)
-        self.assertTrue((round_dir / "analysis_report.md").is_file())
         self.assertEqual(self.store.get_round("dup")["status"], "done")
+
+        # A required input (kernel) arriving after the round finished starts a fresh
+        # generation and clears old outputs.
+        round_dir = self.settings.input_dir / "dup"
+        self.store.enqueue_message(self.round_kernel("dup"))
+        self.drain_ingest()
+        self.assertEqual(self.store.get_round("dup")["generation"], 2)
+        self.assertEqual(self.store.get_round("dup")["status"], "receiving")
+        self.assertFalse((round_dir / "analysis_report.md").exists())
+
+        # The re-run completes once IR arrives again.
+        self.store.enqueue_message(self.round_ir_ready("dup"))
+        self.drain_ingest()
+        self.drain_analysis()
+        self.assertEqual(self.store.get_round("dup")["status"], "done")
+        self.assertTrue((round_dir / "analysis_report.md").is_file())
+
+    def test_ir_ready_after_kernel_unblocks_analysis(self) -> None:
+        # Reproduces the production bug: round_end arrives with empty ir, kernel arrives,
+        # and the real IR only shows up later via round_ir_ready. Analysis must wait for IR
+        # and then use the real allowlist.
+        self.write_lsm_hooks("/etc/passwd", "/workspace/ok.py")
+        self.store.enqueue_message(self.round_end("late-ir", ir=False))
+        self.store.enqueue_message(self.round_kernel("late-ir"))
+        self.drain_ingest()
+
+        round_dir = self.settings.input_dir / "late-ir"
+        self.assertEqual(self.store.get_round("late-ir")["status"], "receiving")
+        self.assertFalse(self.pipeline.analyze_once())
+        self.assertFalse((round_dir / "analysis_report.md").exists())
+
+        ir = {
+            "policies": [
+                {
+                    "effect": "allow",
+                    "objects": [
+                        {"type": "file", "identifier": "/workspace/**/*.py", "actions": ["read"]},
+                    ],
+                }
+            ]
+        }
+        self.store.enqueue_message(self.round_ir_ready("late-ir", ir=ir))
+        self.drain_ingest()
+        self.drain_analysis()
+
+        self.assertEqual(self.store.get_round("late-ir")["status"], "done")
+        violations_path = round_dir / "analysis_violations.jsonl"
+        violations = [
+            json.loads(line)
+            for line in violations_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        self.assertEqual([violation["path"] for violation in violations], ["/etc/passwd"])
+
+    def test_empty_ir_round_end_does_not_trigger_premature_analysis(self) -> None:
+        self.store.enqueue_message(self.round_end("empty-ir", ir=False))
+        self.store.enqueue_message(self.round_kernel("empty-ir"))
+        self.drain_ingest()
+
+        self.assertEqual(self.store.get_round("empty-ir")["status"], "receiving")
+        self.assertFalse(self.pipeline.analyze_once())
+        self.assertFalse((self.settings.input_dir / "empty-ir" / "analysis_report.md").exists())
 
     def test_burst_messages_are_queued_and_processed(self) -> None:
         for index in range(20):

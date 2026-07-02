@@ -19,6 +19,7 @@ from .state import ROUND_RESET_STATUSES, StateStore, json_size, now_iso
 INPUT_FILES = {
     "round_end.json",
     "round_kernel.json",
+    "ir.json",
     "kernel_syscall_seq.jsonl",
     "kernel_lsm_hook_result.jsonl",
     "analysis_violations.jsonl",
@@ -193,7 +194,7 @@ class RealtimePipeline:
         if not round_id:
             log.warning("消息缺少 round_id，忽略 message_id=%s push_type=%s", message["id"], push_type)
             return None
-        if push_type not in {"round_end", "round_kernel"}:
+        if push_type not in {"round_end", "round_kernel", "round_ir_ready"}:
             log.info("[%s] 忽略未处理 push_type=%s message_id=%s", round_id, push_type, message["id"])
             return None
 
@@ -215,10 +216,20 @@ class RealtimePipeline:
             message.get("received_at") or now_iso(),
         )
 
-        if push_type == "round_end":
+        if push_type == "round_ir_ready":
+            state = self._record_ir(str(round_id), generation, round_dir, payload)
+            if state is None:
+                return generation
+        elif push_type == "round_end":
+            # round_end 只提供报告元数据（action_json/score/time），不参与就绪门控。
             path = round_dir / "round_end.json"
             atomic_write_json(path, payload)
             state = self.store.record_round_input(str(round_id), generation, "round_end", path)
+            # 向后兼容：旧上游把 IR 放在 round_end.ir_json 里；仅当尚无独立 IR 时采用。
+            if payload.get("ir_json") and not state.get("has_ir"):
+                ir_state = self._record_ir(str(round_id), generation, round_dir, payload)
+                if ir_state is not None:
+                    state = ir_state
         else:
             path = round_dir / "round_kernel.json"
             atomic_write_json(path, payload)
@@ -246,17 +257,26 @@ class RealtimePipeline:
             log.info("[%s] round ready, queued analysis job_id=%s generation=%s", round_id, job_id, generation)
         return generation
 
+    def _record_ir(self, round_id: str, generation: int, round_dir: Path, payload: dict[str, Any]) -> dict[str, Any] | None:
+        """Persist a non-empty IR payload to ir.json and mark has_ir. Empty IR is skipped."""
+        if not payload.get("ir_json"):
+            log.info("[%s] IR 为空，跳过（等待真正的 round_ir_ready）generation=%s", round_id, generation)
+            return None
+        path = round_dir / "ir.json"
+        atomic_write_json(path, payload)
+        return self.store.record_round_input(round_id, generation, "round_ir", path)
+
     def _should_start_new_generation(self, round_id: str, push_type: str, round_dir: Path) -> bool:
         state = self.store.get_round(round_id)
         if state is None:
             return has_round_artifacts(round_dir)
+        # 只有必需输入（IR / kernel）能开启新一轮；round_end 等元数据不触发，避免拆散输入。
+        if push_type not in {"round_ir_ready", "round_kernel"}:
+            return False
+        # 轮次已到终态后又收到必需输入 → 视为真正的重跑。
         if state["status"] in ROUND_RESET_STATUSES:
             return True
-        if state["status"] == "receiving":
-            if push_type == "round_end" and int(state["has_round_end"]) == 1:
-                return True
-            if push_type == "round_kernel" and int(state["has_round_kernel"]) == 1:
-                return True
+        # 接收/分析途中重复到达的必需输入原地覆盖，不 bump generation。
         return False
 
 
