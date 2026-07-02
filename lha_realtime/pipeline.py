@@ -17,6 +17,7 @@ from .state import ROUND_TERMINAL_STATUSES, StateStore, json_size, now_iso
 
 
 INPUT_FILES = {
+    "round_start.json",
     "round_end.json",
     "round_kernel.json",
     "ir.json",
@@ -194,7 +195,7 @@ class RealtimePipeline:
         if not round_id:
             log.warning("消息缺少 round_id，忽略 message_id=%s push_type=%s", message["id"], push_type)
             return None
-        if push_type not in {"round_end", "round_kernel", "round_ir_ready"}:
+        if push_type not in {"round_start", "round_end", "round_kernel", "round_ir_ready"}:
             log.info("[%s] 忽略未处理 push_type=%s message_id=%s", round_id, push_type, message["id"])
             return None
 
@@ -216,7 +217,12 @@ class RealtimePipeline:
             message.get("received_at") or now_iso(),
         )
 
-        if push_type == "round_ir_ready":
+        if push_type == "round_start":
+            # round_start 提供 time_start / session_key 等元数据，参与四类消息就绪门控。
+            path = round_dir / "round_start.json"
+            atomic_write_json(path, payload)
+            state = self.store.record_round_input(str(round_id), generation, "round_start", path)
+        elif push_type == "round_ir_ready":
             state = self._record_ir(str(round_id), generation, round_dir, payload)
             if state is None:
                 return generation

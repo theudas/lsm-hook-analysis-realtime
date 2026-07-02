@@ -90,9 +90,11 @@ class StateStore:
                     generation INTEGER NOT NULL,
                     status TEXT NOT NULL,
                     round_dir TEXT NOT NULL,
+                    has_round_start INTEGER NOT NULL DEFAULT 0,
                     has_round_end INTEGER NOT NULL DEFAULT 0,
                     has_round_kernel INTEGER NOT NULL DEFAULT 0,
                     has_ir INTEGER NOT NULL DEFAULT 0,
+                    round_start_path TEXT,
                     round_end_path TEXT,
                     round_kernel_path TEXT,
                     ir_path TEXT,
@@ -136,6 +138,8 @@ class StateStore:
         additions = {
             "has_ir": "INTEGER NOT NULL DEFAULT 0",
             "ir_path": "TEXT",
+            "has_round_start": "INTEGER NOT NULL DEFAULT 0",
+            "round_start_path": "TEXT",
         }
         for column, definition in additions.items():
             if column not in existing:
@@ -293,12 +297,24 @@ class StateStore:
         syscall_path: Path | None = None,
         lsm_path: Path | None = None,
     ) -> dict[str, Any]:
-        if input_kind not in {"round_end", "round_kernel", "round_ir"}:
+        if input_kind not in {"round_start", "round_end", "round_kernel", "round_ir"}:
             raise ValueError(f"unsupported input_kind: {input_kind}")
 
         timestamp = now_iso()
         with self._lock, self._conn:
-            if input_kind == "round_end":
+            if input_kind == "round_start":
+                self._conn.execute(
+                    """
+                    UPDATE round_states
+                    SET has_round_start = 1,
+                        round_start_path = ?,
+                        updated_at = ?
+                    WHERE round_id = ?
+                      AND generation = ?
+                    """,
+                    (str(file_path), timestamp, round_id, generation),
+                )
+            elif input_kind == "round_end":
                 self._conn.execute(
                     """
                     UPDATE round_states
@@ -350,7 +366,14 @@ class StateStore:
             ).fetchone()
             if row is None:
                 raise RuntimeError(f"round state disappeared: {round_id} generation={generation}")
-            ready = bool(row["has_ir"]) and bool(row["has_round_kernel"])
+            # 四类消息（round_start / round_end / round_kernel / round_ir_ready）
+            # 到达顺序不确定，必须全部就位后再触发分析，保证报告内容完整不为空。
+            ready = (
+                bool(row["has_round_start"])
+                and bool(row["has_round_end"])
+                and bool(row["has_ir"])
+                and bool(row["has_round_kernel"])
+            )
             if ready and row["status"] == "receiving":
                 self._conn.execute(
                     """

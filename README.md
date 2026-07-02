@@ -1,6 +1,6 @@
 # LSM Hook Realtime Analysis
 
-实时版 LSM hook 分析服务。它会持续接收监控服务推送的 round 信息，收到完整 round 后立即分析，并把分析报告路径上报给后端接口。
+实时版 LSM hook 分析服务。它会持续接收监控服务推送的 round 信息。每个 round 由四类消息组成——`round_start`、`round_end`、`round_kernel`、`round_ir_ready`，到达顺序不固定；服务会等这四类消息全部收齐后再启动分析，保证报告内容完整不为空，并把分析报告路径上报给后端接口。报告中包含“报告生成时间”。
 
 ## 1. 服务做什么
 
@@ -174,8 +174,8 @@ sudo systemctl reset-failed lha_realtime.service
 
 - 取消旧的未完成分析任务。
 - 清理 `input/<round_id>/` 下旧的输入、内核 JSONL、分析报告和上报 marker。
-- 重新等待 `round_end` 和 `round_kernel`。
-- 两者都到达后重新分析，并按配置决定是否上报。
+- 重新等待四类消息 `round_start` / `round_end` / `round_kernel` / `round_ir_ready`。
+- 四者全部到达后重新分析，并按配置决定是否上报。
 
 ## 8. 运行测试
 

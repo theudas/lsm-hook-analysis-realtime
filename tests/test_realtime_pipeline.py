@@ -80,6 +80,15 @@ class RealtimePipelineTest(unittest.TestCase):
             payload["ir_json"] = json.dumps({"level2": {"policies": []}})
         return payload
 
+    def round_start(self, round_id: str, is_mock: bool = False) -> dict:
+        return {
+            "push_type": "round_start",
+            "round_id": round_id,
+            "time_start": "2026-06-16 10:00:00+0800",
+            "session_key": "agent:main:main",
+            "is_mock": is_mock,
+        }
+
     def round_ir_ready(self, round_id: str, ir: dict | None = None, is_mock: bool = False) -> dict:
         return {
             "push_type": "round_ir_ready",
@@ -132,20 +141,45 @@ class RealtimePipelineTest(unittest.TestCase):
         while self.pipeline.analyze_once():
             pass
 
-    def test_round_is_analyzed_after_both_messages_arrive(self) -> None:
+    def test_round_is_analyzed_after_all_messages_arrive(self) -> None:
+        # 四类消息乱序到达，全部就位后才分析。
         self.store.enqueue_message(self.round_kernel("r1"))
         self.store.enqueue_message(self.round_end("r1"))
+        self.store.enqueue_message(self.round_ir_ready("r1"))
+        self.store.enqueue_message(self.round_start("r1"))
 
         self.drain_ingest()
         self.drain_analysis()
 
         round_dir = self.settings.input_dir / "r1"
+        self.assertTrue((round_dir / "round_start.json").is_file())
         self.assertTrue((round_dir / "round_end.json").is_file())
         self.assertTrue((round_dir / "round_kernel.json").is_file())
         self.assertTrue((round_dir / "analysis_report.md").is_file())
         self.assertEqual(self.store.get_round("r1")["status"], "done")
+        report = (round_dir / "analysis_report.md").read_text(encoding="utf-8")
+        self.assertIn("报告生成时间", report)
+
+    def test_analysis_waits_until_round_start_arrives(self) -> None:
+        # 缺少 round_start 时，即使其余三类消息齐备也不能触发分析。
+        self.store.enqueue_message(self.round_end("wait-start"))
+        self.store.enqueue_message(self.round_kernel("wait-start"))
+        self.store.enqueue_message(self.round_ir_ready("wait-start"))
+        self.drain_ingest()
+
+        round_dir = self.settings.input_dir / "wait-start"
+        self.assertEqual(self.store.get_round("wait-start")["status"], "receiving")
+        self.assertFalse(self.pipeline.analyze_once())
+        self.assertFalse((round_dir / "analysis_report.md").exists())
+
+        self.store.enqueue_message(self.round_start("wait-start"))
+        self.drain_ingest()
+        self.drain_analysis()
+        self.assertEqual(self.store.get_round("wait-start")["status"], "done")
+        self.assertTrue((round_dir / "analysis_report.md").is_file())
 
     def test_second_round_end_updates_metadata_without_new_generation(self) -> None:
+        self.store.enqueue_message(self.round_start("dup"))
         self.store.enqueue_message(self.round_end("dup", score=1.0))
         self.store.enqueue_message(self.round_kernel("dup"))
         self.drain_ingest()
@@ -168,6 +202,7 @@ class RealtimePipelineTest(unittest.TestCase):
         # A completed round re-runs the full pipeline from its persisted inputs even when
         # only a single required message (here: kernel) is replayed.
         self.write_lsm_hooks("/etc/passwd")
+        self.store.enqueue_message(self.round_start("r"))
         self.store.enqueue_message(self.round_end("r", ir=False))
         self.store.enqueue_message(self.round_kernel("r"))
         self.store.enqueue_message(self.round_ir_ready("r"))
@@ -191,6 +226,7 @@ class RealtimePipelineTest(unittest.TestCase):
         pipeline = RealtimePipeline(store=self.store, settings=self.settings, push_reports=True)
 
         def feed_full_round(round_id: str) -> None:
+            self.store.enqueue_message(self.round_start(round_id))
             self.store.enqueue_message(self.round_end(round_id))
             self.store.enqueue_message(self.round_kernel(round_id))
             self.store.enqueue_message(self.round_ir_ready(round_id))
@@ -219,6 +255,7 @@ class RealtimePipelineTest(unittest.TestCase):
         # and the real IR only shows up later via round_ir_ready. Analysis must wait for IR
         # and then use the real allowlist.
         self.write_lsm_hooks("/etc/passwd", "/workspace/ok.py")
+        self.store.enqueue_message(self.round_start("late-ir"))
         self.store.enqueue_message(self.round_end("late-ir", ir=False))
         self.store.enqueue_message(self.round_kernel("late-ir"))
         self.drain_ingest()
@@ -252,6 +289,7 @@ class RealtimePipelineTest(unittest.TestCase):
         self.assertEqual([violation["path"] for violation in violations], ["/etc/passwd"])
 
     def test_empty_ir_round_end_does_not_trigger_premature_analysis(self) -> None:
+        self.store.enqueue_message(self.round_start("empty-ir"))
         self.store.enqueue_message(self.round_end("empty-ir", ir=False))
         self.store.enqueue_message(self.round_kernel("empty-ir"))
         self.drain_ingest()
@@ -263,6 +301,7 @@ class RealtimePipelineTest(unittest.TestCase):
     def test_burst_messages_are_queued_and_processed(self) -> None:
         for index in range(20):
             round_id = f"burst-{index}"
+            self.store.enqueue_message(self.round_start(round_id))
             self.store.enqueue_message(self.round_end(round_id))
             self.store.enqueue_message(self.round_kernel(round_id))
 
@@ -275,6 +314,7 @@ class RealtimePipelineTest(unittest.TestCase):
             self.assertTrue((self.settings.input_dir / round_id / "analysis_report.md").is_file())
 
     def test_analysis_failure_retries_then_marks_failed(self) -> None:
+        self.store.enqueue_message(self.round_start("bad"))
         self.store.enqueue_message(self.round_end("bad", bad_ir=True))
         self.store.enqueue_message(self.round_kernel("bad"))
         self.drain_ingest()
@@ -308,6 +348,7 @@ class RealtimePipelineTest(unittest.TestCase):
         }
         round_end = self.round_end("new-match")
         round_end["ir_json"] = json.dumps(ir)
+        self.store.enqueue_message(self.round_start("new-match"))
         self.store.enqueue_message(round_end)
         self.store.enqueue_message(self.round_kernel("new-match"))
 
@@ -337,6 +378,7 @@ class RealtimePipelineTest(unittest.TestCase):
         self.assertEqual(self.store.get_round("recover")["status"], "receiving")
 
     def test_mock_round_push_is_disabled_by_default(self) -> None:
+        self.store.enqueue_message(self.round_start("mock-skip", is_mock=True))
         self.store.enqueue_message(self.round_end("mock-skip", is_mock=True))
         self.store.enqueue_message(self.round_kernel("mock-skip", is_mock=True))
         self.drain_ingest()
@@ -358,6 +400,7 @@ class RealtimePipelineTest(unittest.TestCase):
         store = StateStore(settings=settings)
         pipeline = RealtimePipeline(store=store, settings=settings, push_reports=True)
         try:
+            store.enqueue_message(self.round_start("mock-push", is_mock=True))
             store.enqueue_message(self.round_end("mock-push", is_mock=True))
             store.enqueue_message(self.round_kernel("mock-push", is_mock=True))
             while pipeline.ingest_once(limit=100):

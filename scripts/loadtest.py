@@ -12,8 +12,9 @@ the report backend:
 
 Synthetic rounds are cloned from the real rounds in ./input (any round that has
 round_end.json + kernel_lsm_hook_result.jsonl + kernel_syscall_seq.jsonl). Each
-synthetic round is fed as two inbox messages (round_end + round_kernel) at a
-controlled rate, exactly like the receiver would.
+synthetic round is fed as three inbox messages (round_start + round_end +
+round_kernel) at a controlled rate, exactly like the receiver would. The IR
+gating flag is satisfied from the ir_json embedded in the cloned round_end.
 
 Metrics reported:
   - target vs achieved enqueue rate (rounds/s)
@@ -91,7 +92,15 @@ def find_templates(input_dir: Path, limit: int | None = None) -> list[dict]:
     return templates
 
 
-def make_messages(template: dict, round_id: str) -> tuple[dict, dict]:
+def make_messages(template: dict, round_id: str) -> tuple[dict, dict, dict]:
+    start = {
+        "push_type": "round_start",
+        "round_id": round_id,
+        "time_start": template["end_payload"].get("time_start"),
+        "session_key": template["end_payload"].get("session_key"),
+        "is_mock": True,
+    }
+
     end = dict(template["end_payload"])
     end["push_type"] = "round_end"
     end["round_id"] = round_id
@@ -103,7 +112,7 @@ def make_messages(template: dict, round_id: str) -> tuple[dict, dict]:
     kernel["is_mock"] = True
     kernel["kernel_syscall_seq"] = template["syscall_src"]
     kernel["kernel_lsm_hook_result"] = template["lsm_src"]
-    return end, kernel
+    return start, end, kernel
 
 
 def percentile(values: list[float], pct: float) -> float:
@@ -213,9 +222,10 @@ def run_load_test(args: argparse.Namespace) -> int:
     for i in range(args.rounds):
         tmpl = templates[i % len(templates)]
         round_id = f"lt-{i:08d}"
-        end_msg, kernel_msg = make_messages(tmpl, round_id)
+        start_msg, end_msg, kernel_msg = make_messages(tmpl, round_id)
         now = time.monotonic()
         send_at[round_id] = now
+        store.enqueue_message(start_msg)
         store.enqueue_message(end_msg)
         store.enqueue_message(kernel_msg)
         if interval:

@@ -55,7 +55,15 @@ def on_push(data):
         log.warning("消息缺少 round_id，忽略 push_type=%s keys=%s", push_type, sorted(data.keys()))
         return
 
-    if push_type == "round_end":
+    if push_type == "round_start":
+        log.info(
+            "[%s] round_start 摘要 is_mock=%s time_start=%s session_key=%s",
+            round_id,
+            data.get("is_mock"),
+            data.get("time_start"),
+            data.get("session_key"),
+        )
+    elif push_type == "round_end":
         log.info(
             "[%s] round_end 摘要 overall_score=%s time_start=%s time_end=%s is_mock=%s "
             "action_json_len=%d ir_json_len=%d",

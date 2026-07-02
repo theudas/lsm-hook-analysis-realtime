@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import re
 import time
+from datetime import datetime
 from pathlib import Path
 from urllib import error, request
 
@@ -312,6 +313,7 @@ def classify(path: str | None) -> str:
 def analyze_round(round_dir: Path) -> dict:
     started = time.monotonic()
     input_files = {
+        "round_start": round_dir / "round_start.json",
         "round_end": round_dir / "round_end.json",
         "round_kernel": round_dir / "round_kernel.json",
         "ir": round_dir / "ir.json",
@@ -325,6 +327,7 @@ def analyze_round(round_dir: Path) -> dict:
         {name: {"exists": path.is_file(), "size": file_size(path)} for name, path in input_files.items()},
     )
 
+    round_start = load_json_file(input_files["round_start"])
     round_end = load_json_file(input_files["round_end"])
     round_kernel = load_json_file(input_files["round_kernel"])
     lsm = load_jsonl(input_files["lsm"])
@@ -352,8 +355,9 @@ def analyze_round(round_dir: Path) -> dict:
             violations.append(violation)
 
     result = {
-        "round_id": round_end.get("round_id", round_dir.name),
-        "time_start": round_end.get("time_start"),
+        "round_id": round_end.get("round_id") or round_start.get("round_id") or round_dir.name,
+        "session_key": round_start.get("session_key"),
+        "time_start": round_end.get("time_start") or round_start.get("time_start"),
         "time_end": round_end.get("time_end"),
         "overall_score": round_end.get("overall_score"),
         "tool_name": round_kernel.get("round_id") and next(
@@ -402,7 +406,9 @@ def write_outputs(round_dir: Path, result: dict) -> tuple[Path, Path]:
     add = lines.append
     counts = result["counts"]
     add(f"# 越权分析报告 — round `{result['round_id']}`\n")
-    add(f"- 时间窗: {result['time_start']} → {result['time_end']}")
+    add(f"- 报告生成时间: {datetime.now().isoformat(timespec='seconds')}")
+    add(f"- 会话: `{result.get('session_key')}`")
+    add(f"- round时间段: {result['time_start']} → {result['time_end']}")
     add(f"- 工具: `{result['tool_name']}`")
     add(f"- 用户态判定得分: {result['overall_score']}")
     add(
