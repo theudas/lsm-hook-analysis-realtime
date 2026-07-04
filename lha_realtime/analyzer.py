@@ -74,7 +74,13 @@ def parse_allowlist(ir_source: dict) -> dict:
 
     ir_source 可以是 ir.json（round_ir_ready）或 round_end.json 的 payload，两者都含 ir_json 键。
     """
-    allowed = {"files": set(), "tools": set(), "file_actions": {}}
+    allowed = {
+        "files": set(),
+        "tools": set(),
+        "file_actions": {},
+        "networks": set(),
+        "network_actions": set(),
+    }
     ir = json.loads(ir_source.get("ir_json") or "{}")
     policies = ir.get("level2", {}).get("policies")
     if policies is None:
@@ -95,6 +101,12 @@ def parse_allowlist(ir_source: dict) -> dict:
                         actions.append(action)
             elif obj.get("type") == "tool":
                 allowed["tools"].add(obj["identifier"])
+            elif obj.get("type") == "network":
+                identifier = obj.get("identifier")
+                if identifier:
+                    allowed["networks"].add(identifier)
+                for action in obj.get("actions", []):
+                    allowed["network_actions"].add(action)
     return allowed
 
 
@@ -132,6 +144,7 @@ def extract_kernel_file_ops(lsm: list, syscalls: list) -> list:
 
     opens = {}
     reads = {}
+    writes = {}
     for syscall in syscalls:
         if syscall.get("action") == "open":
             ret = syscall.get("return_value")
@@ -141,9 +154,15 @@ def extract_kernel_file_ops(lsm: list, syscalls: list) -> list:
             reads.setdefault((syscall["pid"], syscall["fd"]), []).append(
                 (syscall["timestamp_mono_ns"], syscall.get("returned_bytes") or 0)
             )
+        elif syscall.get("action") == "write":
+            writes.setdefault((syscall["pid"], syscall["fd"]), []).append(
+                (syscall["timestamp_mono_ns"], syscall.get("returned_bytes") or 0)
+            )
     for values in opens.values():
         values.sort()
     for values in reads.values():
+        values.sort()
+    for values in writes.values():
         values.sort()
 
     ops = []
@@ -153,6 +172,7 @@ def extract_kernel_file_ops(lsm: list, syscalls: list) -> list:
         open_ts = hook["timestamp_mono_ns"]
 
         read_bytes = read_count = 0
+        write_bytes = write_count = 0
         if isinstance(open_fd, int) and open_fd >= 0:
             later = [ts for ts in opens.get((hook["pid"], open_fd), []) if ts > open_ts]
             next_open_ts = min(later) if later else float("inf")
@@ -160,6 +180,18 @@ def extract_kernel_file_ops(lsm: list, syscalls: list) -> list:
                 if open_ts <= ts < next_open_ts:
                     read_bytes += nb
                     read_count += 1
+            for ts, nb in writes.get((hook["pid"], open_fd), []):
+                if open_ts <= ts < next_open_ts:
+                    write_bytes += nb
+                    write_count += 1
+
+        observed_actions = flags_to_actions(hook.get("args", {}).get("flags"))
+        if read_count:
+            observed_actions.add("read")
+        if write_count:
+            observed_actions.add("write")
+        if not observed_actions:
+            observed_actions.add("read")
 
         ops.append(
             {
@@ -183,10 +215,89 @@ def extract_kernel_file_ops(lsm: list, syscalls: list) -> list:
                 "requested_bytes": related.get("requested_bytes") if related else None,
                 "read_bytes": read_bytes,
                 "read_count": read_count,
+                "write_bytes": write_bytes,
+                "write_count": write_count,
+                "observed_actions": sorted(observed_actions),
             }
         )
     ops.sort(key=lambda row: row["timestamp_mono_ns"])
     return ops
+
+
+def flags_to_actions(flags: str | None) -> set:
+    """把 file_open 的 open flags 映射到 IR 动作词汇 read/write/create。"""
+    actions = set()
+    if not flags:
+        return actions
+    if "O_CREAT" in flags:
+        actions.add("create")
+    if "O_WRONLY" in flags or "O_RDWR" in flags or "O_TRUNC" in flags:
+        actions.add("write")
+    if "O_RDONLY" in flags or "O_RDWR" in flags:
+        actions.add("read")
+    return actions
+
+
+NETWORK_SEND_ACTIONS = ("send", "sendto", "sendmsg")
+NETWORK_RECV_ACTIONS = ("recv", "recvfrom", "recvmsg")
+
+
+def connect_endpoints(syscalls: list) -> dict:
+    """从 connect syscall 建立 (pid, fd) -> [(ts, endpoint)]，用于给 send/recv 标注目标（best-effort）。"""
+    conns: dict = {}
+    for syscall in syscalls:
+        if syscall.get("action") != "connect":
+            continue
+        args = syscall.get("args", {}) or {}
+        ip = args.get("remote_ip")
+        port = args.get("remote_port")
+        if ip:
+            endpoint = f"{ip}:{port}" if port is not None else ip
+        else:
+            endpoint = args.get("sun_path")
+        fd = args.get("sockfd", args.get("fd", syscall.get("fd")))
+        conns.setdefault((syscall.get("pid"), fd), []).append(
+            (syscall.get("timestamp_mono_ns", 0), endpoint)
+        )
+    for values in conns.values():
+        values.sort()
+    return conns
+
+
+def parse_network_activity(syscalls: list) -> dict:
+    """汇总该 round 的 send / receive 网络行为。
+
+    只要出现 send/receive 系统调用就计入，不论目标是外部主机、本地 IPC 还是监控端口；
+    并 best-effort 关联 connect 的目标端点用于报告展示。
+    """
+    conns = connect_endpoints(syscalls)
+
+    def lookup(pid, fd, ts):
+        records = conns.get((pid, fd))
+        if not records:
+            return None
+        chosen = None
+        for rec_ts, endpoint in records:
+            if rec_ts <= ts:
+                chosen = endpoint
+            else:
+                break
+        return chosen if chosen is not None else records[0][1]
+
+    actions = set()
+    endpoints = set()
+    for syscall in syscalls:
+        action = syscall.get("action")
+        if action in NETWORK_SEND_ACTIONS:
+            actions.add("send")
+        elif action in NETWORK_RECV_ACTIONS:
+            actions.add("receive")
+        else:
+            continue
+        endpoint = lookup(syscall.get("pid"), syscall.get("fd"), syscall.get("timestamp_mono_ns", 0))
+        if endpoint:
+            endpoints.add(endpoint)
+    return {"actions": actions, "endpoints": endpoints}
 
 
 REGEX_HINTS = ("^", "$", "+", "|", "(", ")", "{", "}", "\\", ".*")
@@ -310,6 +421,60 @@ def classify(path: str | None) -> str:
     return "other"
 
 
+def matching_allowed_actions(path: str | None, allowed: dict) -> set | None:
+    """path 命中 IR 文件标识时，返回所有命中标识的允许动作并集；未命中返回 None。"""
+    matched = None
+    for identifier in allowed["files"]:
+        if matches_file_identifier(path, identifier):
+            if matched is None:
+                matched = set()
+            matched.update(allowed["file_actions"].get(identifier, []))
+    return matched
+
+
+def detect_anomalies(violations: list, kernel_ops: list, allowed: dict, net_observed: dict) -> dict:
+    """依据两条规则给出明确判定：敏感文件越权、IR action 与实际行为不一致。"""
+    types = []
+
+    sensitive_paths = sorted(
+        {v["path"] for v in violations if v.get("category") == "sensitive" and v.get("path")}
+    )
+    if sensitive_paths:
+        types.append({"type": "访问危险文件（敏感越权）", "paths": sensitive_paths})
+
+    file_mismatches = []
+    for op in kernel_ops:
+        allowed_actions = matching_allowed_actions(op.get("path"), allowed)
+        if allowed_actions is None:
+            continue
+        extra = sorted(a for a in op.get("observed_actions", []) if a not in allowed_actions)
+        if extra:
+            file_mismatches.append(
+                {
+                    "path": op["path"],
+                    "allowed": sorted(allowed_actions),
+                    "extra": extra,
+                    "hook_name": op.get("hook_name"),
+                    "event_id": op.get("event_id"),
+                }
+            )
+    if file_mismatches:
+        types.append({"type": "文件访问出现未授权动作", "items": file_mismatches})
+
+    net_extra = sorted(net_observed["actions"] - allowed["network_actions"])
+    if net_extra:
+        types.append(
+            {
+                "type": "网络访问出现未授权动作",
+                "allowed": sorted(allowed["network_actions"]),
+                "extra": net_extra,
+                "endpoints": sorted(net_observed["endpoints"]),
+            }
+        )
+
+    return {"is_anomaly": bool(types), "types": types}
+
+
 def analyze_round(round_dir: Path) -> dict:
     started = time.monotonic()
     input_files = {
@@ -337,6 +502,7 @@ def analyze_round(round_dir: Path) -> dict:
     user_actions = parse_user_actions(round_end)
     resource_facts = parse_resource_facts(round_kernel)
     kernel_ops = extract_kernel_file_ops(lsm, syscalls)
+    net_observed = parse_network_activity(syscalls)
 
     violations = []
     role_ir_mismatch = 0
@@ -354,6 +520,8 @@ def analyze_round(round_dir: Path) -> dict:
             violation["judges_agree"] = ir_violation == role_violation
             violations.append(violation)
 
+    anomaly = detect_anomalies(violations, kernel_ops, allowed, net_observed)
+
     result = {
         "round_id": round_end.get("round_id") or round_start.get("round_id") or round_dir.name,
         "session_key": round_start.get("session_key"),
@@ -367,6 +535,12 @@ def analyze_round(round_dir: Path) -> dict:
         "allowed_files": sorted(allowed["files"]),
         "allowed_tools": sorted(allowed["tools"]),
         "file_actions": allowed["file_actions"],
+        "allowed_networks": sorted(allowed["networks"]),
+        "allowed_network_actions": sorted(allowed["network_actions"]),
+        "network_observed": sorted(net_observed["actions"]),
+        "network_endpoints": sorted(net_observed["endpoints"]),
+        "is_anomaly": anomaly["is_anomaly"],
+        "anomaly_types": anomaly["types"],
         "user_actions": user_actions,
         "resource_facts": resource_facts,
         "counts": {
@@ -406,6 +580,32 @@ def write_outputs(round_dir: Path, result: dict) -> tuple[Path, Path]:
     add = lines.append
     counts = result["counts"]
     add(f"# 越权分析报告 — round `{result['round_id']}`\n")
+
+    add("## 判定结论\n")
+    add(f"- 是否异常: {'是' if result['is_anomaly'] else '否'}")
+    if result["anomaly_types"]:
+        add("- 异常类型:")
+        for item in result["anomaly_types"]:
+            if item["type"] == "访问危险文件（敏感越权）":
+                paths = ", ".join(f"`{p}`" for p in item["paths"])
+                add(f"  - {item['type']}: {paths}")
+            elif item["type"] == "文件访问出现未授权动作":
+                add(f"  - {item['type']}:")
+                for mismatch in item["items"]:
+                    add(
+                        f"    - `{mismatch['path']}` 允许[{', '.join(mismatch['allowed'])}] "
+                        f"实际出现[{', '.join(mismatch['extra'])}]（event_id {mismatch['event_id']}）"
+                    )
+            elif item["type"] == "网络访问出现未授权动作":
+                endpoints = f"，目标 {', '.join(item['endpoints'])}" if item.get("endpoints") else ""
+                add(
+                    f"  - {item['type']}: 允许[{', '.join(item['allowed'])}] "
+                    f"实际出现[{', '.join(item['extra'])}]{endpoints}"
+                )
+    else:
+        add("- 异常类型: 无")
+    add("> 说明: `delete` 动作当前无对应 syscall/hook，暂不参与判定；网络只要出现 send/receive 行为即计入（不论目标是外部主机、本地 IPC 还是监控端口），未被 IR 授权即判为异常，不做 URL 级精确匹配。\n")
+
     add(f"- 报告生成时间: {datetime.now().isoformat(timespec='seconds')}")
     add(f"- 会话: `{result.get('session_key')}`")
     add(f"- round时间段: {result['time_start']} → {result['time_end']}")
