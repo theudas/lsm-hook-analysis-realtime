@@ -409,11 +409,41 @@ RUNTIME_PREFIXES = (
     "/etc/nsswitch.conf",
     "/run/systemd/userdb",
 )
+# openclaw 运行时自身访问的文件/目录：虽然位于 /root/.openclaw（默认判为 sensitive），
+# 但属于框架正常运行所需，应归为 runtime，避免误报为敏感越权。
+OPENCLAW_RUNTIME_PREFIXES = (
+    "/usr/lib/node_modules/openclaw",
+    "/root/.openclaw/extensions",
+    "/root/.openclaw/agents",
+    "/root/.openclaw/completions",
+)
+# openclaw 的运行时上下文文档（AGENT.md 等），无论落在哪个 workspace 目录都视为 runtime。
+OPENCLAW_RUNTIME_BASENAMES = (
+    "AGENT.md",
+    "AGENTS.md",
+    "SOUL.md",
+    "HEARTBEAT.md",
+    "TOOLS.md",
+    "IDENTITY.md",
+    "MEMORY.md",
+    "USER.md",
+)
+
+
+def is_openclaw_runtime(path: str) -> bool:
+    if path.startswith(OPENCLAW_RUNTIME_PREFIXES):
+        return True
+    basename = path.rsplit("/", 1)[-1]
+    if basename in OPENCLAW_RUNTIME_BASENAMES and ("/.openclaw/" in path or "/workspace/" in path):
+        return True
+    return False
 
 
 def classify(path: str | None) -> str:
     if path is None:
         return "unknown"
+    if is_openclaw_runtime(path):
+        return "runtime"
     if path.startswith(SENSITIVE_PREFIXES):
         return "sensitive"
     if path.startswith(RUNTIME_PREFIXES):
