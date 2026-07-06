@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from lha_realtime.analyzer import matches_file_identifier
+from lha_realtime.analyzer import analyze_round, matches_file_identifier
 from lha_realtime.config import Settings
 from lha_realtime.pipeline import RealtimePipeline
 from lha_realtime.state import StateStore
@@ -40,6 +40,153 @@ class FileIdentifierMatcherTest(unittest.TestCase):
 
     def test_invalid_regex_does_not_allow(self) -> None:
         self.assertFalse(matches_file_identifier("/tmp/a.txt", r"(/tmp/[a-z]+\.txt"))
+
+
+class AnalyzerActionMismatchTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.round_dir = Path(self.tmp.name) / "round"
+        self.round_dir.mkdir()
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def write_round(self, *, ir: dict, lsm: list[dict], syscalls: list[dict] | None = None) -> None:
+        (self.round_dir / "round_start.json").write_text(
+            json.dumps(
+                {
+                    "push_type": "round_start",
+                    "round_id": "round",
+                    "time_start": "2026-06-16 10:00:00+0800",
+                    "session_key": "agent:main:main",
+                }
+            ),
+            encoding="utf-8",
+        )
+        (self.round_dir / "round_end.json").write_text(
+            json.dumps(
+                {
+                    "push_type": "round_end",
+                    "round_id": "round",
+                    "time_end": "2026-06-16 10:00:01+0800",
+                    "action_json": "[]",
+                }
+            ),
+            encoding="utf-8",
+        )
+        (self.round_dir / "round_kernel.json").write_text(
+            json.dumps(
+                {
+                    "push_type": "round_kernel",
+                    "round_id": "round",
+                    "kernel_resource_facts": json.dumps({"resource_facts": []}),
+                }
+            ),
+            encoding="utf-8",
+        )
+        (self.round_dir / "ir.json").write_text(
+            json.dumps({"push_type": "round_ir_ready", "round_id": "round", "ir_json": json.dumps(ir)}),
+            encoding="utf-8",
+        )
+        (self.round_dir / "kernel_lsm_hook_result.jsonl").write_text(
+            "\n".join(json.dumps(row, ensure_ascii=False) for row in lsm) + "\n",
+            encoding="utf-8",
+        )
+        syscall_rows = syscalls or []
+        (self.round_dir / "kernel_syscall_seq.jsonl").write_text(
+            "\n".join(json.dumps(row, ensure_ascii=False) for row in syscall_rows),
+            encoding="utf-8",
+        )
+
+    def test_file_action_mismatch_marks_round_anomalous(self) -> None:
+        ir = {
+            "policies": [
+                {
+                    "effect": "allow",
+                    "objects": [
+                        {"type": "file", "identifier": "/tmp/action.txt", "actions": ["read"]},
+                    ],
+                }
+            ]
+        }
+        self.write_round(
+            ir=ir,
+            lsm=[
+                {
+                    "event_id": "file-write",
+                    "hook_name": "file_open",
+                    "result": "allow",
+                    "return_value": 0,
+                    "pid": 1000,
+                    "tid": 1000,
+                    "timestamp_mono_ns": 1,
+                    "path": "/tmp/action.txt",
+                    "category": "other",
+                    "resource_role": "declared_resource",
+                    "tool_call_id": "call-1",
+                    "tool_name": "safe_file_reader__read_text",
+                    "related_event_id": None,
+                    "args": {"flags": "O_WRONLY|O_CREAT"},
+                }
+            ],
+        )
+
+        result = analyze_round(self.round_dir)
+
+        self.assertTrue(result["is_anomaly"])
+        mismatch = next(item for item in result["anomaly_types"] if item["type"] == "文件访问出现未授权动作")
+        self.assertEqual(mismatch["items"][0]["allowed"], ["read"])
+        self.assertEqual(mismatch["items"][0]["extra"], ["create", "write"])
+
+    def test_lsm_only_network_action_mismatch_marks_round_anomalous(self) -> None:
+        ir = {
+            "policies": [
+                {
+                    "effect": "allow",
+                    "objects": [
+                        {"type": "network", "identifier": "*", "actions": ["send"]},
+                    ],
+                }
+            ]
+        }
+        self.write_round(
+            ir=ir,
+            lsm=[
+                {
+                    "event_id": "net-recv",
+                    "hook_name": "socket_recvmsg",
+                    "result": "allow",
+                    "return_value": 0,
+                    "pid": 1000,
+                    "tid": 1000,
+                    "timestamp_mono_ns": 1,
+                    "category": "unknown",
+                    "fd": 3,
+                    "tool_call_id": "call-1",
+                    "tool_name": "safe_file_reader__read_text",
+                    "args": {"fd": 3},
+                }
+            ],
+        )
+
+        result = analyze_round(self.round_dir)
+
+        self.assertTrue(result["is_anomaly"])
+        self.assertEqual(result["network_observed"], ["receive"])
+        mismatch = next(item for item in result["anomaly_types"] if item["type"] == "网络访问出现未授权动作")
+        self.assertEqual(mismatch["allowed"], ["send"])
+        self.assertEqual(mismatch["extra"], ["receive"])
+
+    def test_d04795d0_lsm_socket_hooks_mark_round_anomalous(self) -> None:
+        fixture = Path(__file__).resolve().parents[1] / "input" / "d04795d0"
+        if not fixture.is_dir():
+            self.skipTest("d04795d0 fixture is not present")
+
+        result = analyze_round(fixture)
+
+        self.assertTrue(result["is_anomaly"])
+        self.assertEqual(result["network_observed"], ["receive", "send"])
+        self.assertTrue(any(item["type"] == "网络访问出现未授权动作" for item in result["anomaly_types"]))
 
 
 class RealtimePipelineTest(unittest.TestCase):

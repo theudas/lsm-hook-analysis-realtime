@@ -153,8 +153,20 @@ NET_BEHAVIOR = {
 }
 
 
+NET_HOOK_ACTIONS = {
+    "socket_sendmsg": "send",
+    "socket_recvmsg": "receive",
+}
+
+
 def is_network_hook(hook_name: str | None) -> bool:
     return bool(hook_name) and hook_name.startswith("socket_")
+
+
+def network_hook_actions(hook_name: str | None) -> set:
+    """Map LSM socket hooks to the IR network action vocabulary."""
+    action = NET_HOOK_ACTIONS.get(hook_name)
+    return {action} if action else set()
 
 
 def net_group(hook_name: str | None) -> str:
@@ -313,11 +325,11 @@ def connect_endpoints(syscalls: list) -> dict:
     return conns
 
 
-def parse_network_activity(syscalls: list) -> dict:
+def parse_network_activity(lsm: list, syscalls: list) -> dict:
     """汇总该 round 的 send / receive 网络行为。
 
-    只要出现 send/receive 系统调用就计入，不论目标是外部主机、本地 IPC 还是监控端口；
-    并 best-effort 关联 connect 的目标端点用于报告展示。
+    只要出现 send/receive 系统调用或对应 LSM hook 就计入，不论目标是外部主机、
+    本地 IPC 还是监控端口；并 best-effort 关联目标端点用于报告展示。
     """
     conns = connect_endpoints(syscalls)
 
@@ -335,6 +347,15 @@ def parse_network_activity(syscalls: list) -> dict:
 
     actions = set()
     endpoints = set()
+    for hook in lsm:
+        hook_actions = network_hook_actions(hook.get("hook_name"))
+        if not hook_actions:
+            continue
+        actions.update(hook_actions)
+        detail = network_detail(hook)
+        if detail:
+            endpoints.add(detail)
+
     for syscall in syscalls:
         action = syscall.get("action")
         if action in NETWORK_SEND_ACTIONS:
@@ -581,7 +602,7 @@ def analyze_round(round_dir: Path) -> dict:
     user_actions = parse_user_actions(round_end)
     resource_facts = parse_resource_facts(round_kernel)
     kernel_ops = extract_kernel_file_ops(lsm, syscalls)
-    net_observed = parse_network_activity(syscalls)
+    net_observed = parse_network_activity(lsm, syscalls)
 
     violations = []
     role_ir_mismatch = 0
