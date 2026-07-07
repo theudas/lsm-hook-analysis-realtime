@@ -22,6 +22,7 @@ from .rules import (
     OPENCLAW_RUNTIME_BASENAMES,
     OPENCLAW_RUNTIME_PREFIXES,
     RUNTIME_PREFIXES,
+    SENSITIVE_GLOBS,
     SENSITIVE_PREFIXES,
     is_ignored_endpoint,
 )
@@ -514,12 +515,21 @@ def is_openclaw_runtime(path: str) -> bool:
     return False
 
 
+# 预编译敏感通配（glob）为正则：用于命中 /proc/<pid>/environ 这类“同目录下仅部分子项敏感”
+# 的场景，避免用宽泛前缀（如 /proc/）把运行时高频访问的普通项一并误报为敏感越权。
+_SENSITIVE_GLOB_REGEXES = tuple(re.compile(glob_to_regex(g)) for g in SENSITIVE_GLOBS)
+
+
+def is_sensitive_glob(path: str) -> bool:
+    return any(pattern.fullmatch(path) for pattern in _SENSITIVE_GLOB_REGEXES)
+
+
 def classify(path: str | None) -> str:
     if path is None:
         return "unknown"
     if is_openclaw_runtime(path):
         return "runtime"
-    if path.startswith(SENSITIVE_PREFIXES):
+    if path.startswith(SENSITIVE_PREFIXES) or is_sensitive_glob(path):
         return "sensitive"
     if path.startswith(RUNTIME_PREFIXES):
         return "runtime"

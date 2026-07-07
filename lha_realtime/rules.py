@@ -17,18 +17,28 @@ PACKAGE_DIR = Path(__file__).parent
 DEFAULT_RULES_PATH = PACKAGE_DIR / "detection_rules.yaml"
 
 
-# 内置默认值：当 YAML 缺失或对应键为空时使用，行为与历史硬编码保持一致。
+# 内置默认值：当 YAML 缺失或对应键为空时使用，与 detection_rules.yaml 的意图保持一致。
 _DEFAULT_SENSITIVE_PREFIXES = (
-    "/etc/passwd",
-    "/etc/group",
     "/etc/shadow",
     "/etc/gshadow",
+    "/etc/sudoers",
     "/var/log/secure",
-    "/var/log/",
+    "/var/log/audit",
     "/root/.ssh",
+    "/root/.aws",
+    "/root/.config/gcloud",
+    "/root/.docker/config.json",
+    "/root/.kube/config",
     "/root/.openclaw",
-    "/proc/",
     "/run/secrets",
+)
+_DEFAULT_SENSITIVE_GLOBS = (
+    "/proc/*/environ",
+    "/proc/*/mem",
+    "/proc/*/maps",
+    "/proc/*/smaps",
+    "/proc/*/pagemap",
+    "/proc/kcore",
 )
 _DEFAULT_RUNTIME_PREFIXES = (
     "/lib",
@@ -36,11 +46,26 @@ _DEFAULT_RUNTIME_PREFIXES = (
     "/usr/lib",
     "/usr/lib64",
     "/etc/ld.so.cache",
+    "/etc/ld.so.preload",
     "/usr/share/locale",
     "/usr/lib/locale",
     "/usr/bin",
     "/bin",
+    "/sbin",
+    "/usr/sbin",
     "/etc/nsswitch.conf",
+    "/etc/passwd",
+    "/etc/group",
+    "/etc/hosts",
+    "/etc/resolv.conf",
+    "/etc/localtime",
+    "/etc/ssl/certs",
+    "/etc/pki",
+    "/proc/",
+    "/sys/",
+    "/dev/null",
+    "/dev/urandom",
+    "/dev/random",
     "/run/systemd/userdb",
 )
 _DEFAULT_OPENCLAW_RUNTIME_PREFIXES = (
@@ -48,6 +73,11 @@ _DEFAULT_OPENCLAW_RUNTIME_PREFIXES = (
     "/root/.openclaw/extensions",
     "/root/.openclaw/agents",
     "/root/.openclaw/completions",
+    "/root/.openclaw/workspace",
+    "/root/.openclaw/logs",
+    "/root/.openclaw/before_tool_call_lab.jsonl",
+    "/root/.openclaw/exec-approvals",
+    "/root/.openclaw/.exec-approvals",
 )
 _DEFAULT_OPENCLAW_RUNTIME_BASENAMES = (
     "AGENT.md",
@@ -97,6 +127,7 @@ _FILES = _RULES.get("files") if isinstance(_RULES.get("files"), dict) else {}
 _NETWORK = _RULES.get("network") if isinstance(_RULES.get("network"), dict) else {}
 
 SENSITIVE_PREFIXES = _tuple(_FILES.get("sensitive_prefixes"), _DEFAULT_SENSITIVE_PREFIXES)
+SENSITIVE_GLOBS = _tuple(_FILES.get("sensitive_globs"), _DEFAULT_SENSITIVE_GLOBS)
 RUNTIME_PREFIXES = _tuple(_FILES.get("runtime_prefixes"), _DEFAULT_RUNTIME_PREFIXES)
 OPENCLAW_RUNTIME_PREFIXES = _tuple(
     _FILES.get("openclaw_runtime_prefixes"), _DEFAULT_OPENCLAW_RUNTIME_PREFIXES

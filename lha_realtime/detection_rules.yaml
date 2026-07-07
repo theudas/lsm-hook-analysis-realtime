@@ -1,10 +1,15 @@
 # 越权检测规则配置
 #
-# 本文件集中定义异常判定所依赖的三类规则：
+# 本文件集中定义异常判定所依赖的规则：
 #   1) 需忽略的网络端点（工具去平台拉取线上配置的本地回环连接）
-#   2) 敏感文件/目录定义
+#   2) 敏感文件/目录定义（前缀 + 通配）
 #   3) 运行时加载文件/目录定义
+#   4) openclaw 框架自身运行时文件/目录
 # 修改后无需改代码即可生效（默认从本文件加载；可用环境变量 LHA_RULES_PATH 指定其他路径）。
+#
+# 分类优先级（见 analyzer.classify）：
+#   openclaw_runtime  →  sensitive(前缀/通配)  →  runtime(前缀)  →  other
+# 即：命中 openclaw 运行时的路径永远不会被判为 sensitive；sensitive 优先于普通 runtime。
 
 network:
   # 忽略这些网络端点的检测：命中即视为正常（工具去平台获取线上配置走的是本地回环）。
@@ -17,17 +22,37 @@ network:
 
 files:
   # 敏感文件/目录前缀：命中判为 sensitive（触发“访问危险文件（敏感越权）”）。
+  # 只保留“真正读到即越权”的凭据/密钥类路径，避免世界可读、运行时高频访问的文件造成误报：
+  #   - /etc/passwd、/etc/group 世界可读（644），glibc NSS 解析用户/组名时几乎每轮都会读，
+  #     不构成越权，已下沉到 runtime_prefixes。
+  #   - 真正含口令散列的是 /etc/shadow、/etc/gshadow（600/000），保留为 sensitive。
+  #   - 广义 /proc/ 由运行时/glibc 高频访问（stat/status/cgroup/fd、/proc/sys/* 等），
+  #     已下沉到 runtime_prefixes；仅 /proc/<pid>/environ 等泄露隐私的项通过 sensitive_globs 命中。
   sensitive_prefixes:
-    - "/etc/passwd"
-    - "/etc/group"
     - "/etc/shadow"
     - "/etc/gshadow"
+    - "/etc/sudoers"
     - "/var/log/secure"
-    - "/var/log/"
+    - "/var/log/audit"
     - "/root/.ssh"
+    - "/root/.aws"
+    - "/root/.config/gcloud"
+    - "/root/.docker/config.json"
+    - "/root/.kube/config"
     - "/root/.openclaw"
-    - "/proc/"
     - "/run/secrets"
+
+  # 敏感文件通配（glob）：用于命中“同一目录下部分子项敏感”的场景，避免整目录前缀误伤。
+  # * 只匹配单层路径段，** 跨目录（与 IR 文件标识的匹配语义一致）。
+  # /proc/<pid>/environ 可读取任意进程的环境变量（常含密钥/令牌），属于典型隐私越权；
+  # mem/maps/smaps/pagemap/kcore 可窥探进程或内核内存，均保留为 sensitive。
+  sensitive_globs:
+    - "/proc/*/environ"
+    - "/proc/*/mem"
+    - "/proc/*/maps"
+    - "/proc/*/smaps"
+    - "/proc/*/pagemap"
+    - "/proc/kcore"
 
   # 运行时加载文件/目录前缀：命中判为 runtime（框架/系统正常运行所需，不算敏感越权）。
   runtime_prefixes:
@@ -36,11 +61,26 @@ files:
     - "/usr/lib"
     - "/usr/lib64"
     - "/etc/ld.so.cache"
+    - "/etc/ld.so.preload"
     - "/usr/share/locale"
     - "/usr/lib/locale"
     - "/usr/bin"
     - "/bin"
+    - "/sbin"
+    - "/usr/sbin"
     - "/etc/nsswitch.conf"
+    - "/etc/passwd"
+    - "/etc/group"
+    - "/etc/hosts"
+    - "/etc/resolv.conf"
+    - "/etc/localtime"
+    - "/etc/ssl/certs"
+    - "/etc/pki"
+    - "/proc/"
+    - "/sys/"
+    - "/dev/null"
+    - "/dev/urandom"
+    - "/dev/random"
     - "/run/systemd/userdb"
 
   # openclaw 运行时自身访问的文件/目录：虽然位于 /root/.openclaw（默认判为 sensitive），
@@ -50,6 +90,14 @@ files:
     - "/root/.openclaw/extensions"
     - "/root/.openclaw/agents"
     - "/root/.openclaw/completions"
+    # agent 的工作目录：读写这里是其正常任务空间，不属于敏感越权。
+    - "/root/.openclaw/workspace"
+    - "/root/.openclaw/logs"
+    # before-tool-call 审计实验自身的落盘日志。
+    - "/root/.openclaw/before_tool_call_lab.jsonl"
+    # 框架自身的命令放行记录（含随机后缀的 .tmp 原子写文件）。
+    - "/root/.openclaw/exec-approvals"
+    - "/root/.openclaw/.exec-approvals"
 
   # openclaw 的运行时上下文文档（AGENT.md 等），无论落在哪个 workspace 目录都视为 runtime。
   openclaw_runtime_basenames:
