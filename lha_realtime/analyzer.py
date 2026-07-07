@@ -167,6 +167,14 @@ NET_HOOK_ACTIONS = {
 }
 
 
+# 文件类 LSM hook 直接隐含的 IR 动作（open 类走 flags_to_actions，这里覆盖删除等无 flags 的 hook）。
+# inode_unlink 对应 unlink(2)/rm 删除文件，inode_rmdir 对应删除目录，均映射为 delete。
+FILE_HOOK_ACTIONS = {
+    "inode_unlink": "delete",
+    "inode_rmdir": "delete",
+}
+
+
 def is_network_hook(hook_name: str | None) -> bool:
     return bool(hook_name) and hook_name.startswith("socket_")
 
@@ -253,6 +261,9 @@ def extract_kernel_file_ops(lsm: list, syscalls: list) -> list:
                     write_count += 1
 
         observed_actions = flags_to_actions(hook.get("args", {}).get("flags"))
+        hook_action = FILE_HOOK_ACTIONS.get(hook.get("hook_name"))
+        if hook_action:
+            observed_actions.add(hook_action)
         if read_count:
             observed_actions.add("read")
         if write_count:
@@ -705,7 +716,7 @@ def write_outputs(round_dir: Path, result: dict) -> tuple[Path, Path]:
                 )
     else:
         add("- 异常类型: 无")
-    # add("> 说明: `delete` 动作当前无对应 syscall/hook，暂不参与判定；网络只要出现 send/receive 行为即计入（不论目标是外部主机、本地 IPC 还是监控端口），未被 IR 授权即判为异常，不做 URL 级精确匹配。\n")
+    add("")
 
     add(f"- 报告生成时间: {datetime.now().isoformat(timespec='seconds')}")
     add(f"- 会话: `{result.get('session_key')}`")
@@ -764,21 +775,23 @@ def write_outputs(round_dir: Path, result: dict) -> tuple[Path, Path]:
             for violation in items:
                 entry = agg.setdefault(
                     violation["path"],
-                    {"hooks": set(), "count": 0, "read_bytes": 0, "agree": set()},
+                    {"hooks": set(), "actions": set(), "count": 0, "read_bytes": 0, "agree": set()},
                 )
                 entry["hooks"].add(violation["hook_name"])
+                entry["actions"].update(violation.get("observed_actions", []))
                 entry["count"] += 1
                 entry["read_bytes"] += violation.get("read_bytes", 0) or 0
                 entry["agree"].add(bool(violation["judges_agree"]))
             add(f"#### {cat_title[category]}（{len(agg)} 个路径 / {len(items)} 次）\n")
-            add("| path | hook | 次数 | 读取字节 | 判据一致 |")
-            add("|---|---|---|---|---|")
+            add("| path | hook | 动作 | 次数 | 读取字节 | 判据一致 |")
+            add("|---|---|---|---|---|---|")
             for path in sorted(agg, key=lambda p: (-agg[p]["count"], p or "")):
                 entry = agg[path]
                 agree = {True: "yes", False: "no"}
                 agree_val = agree[next(iter(entry["agree"]))] if len(entry["agree"]) == 1 else "部分"
                 add(
-                    f"| `{path}` | {', '.join(sorted(entry['hooks']))} | {entry['count']} | "
+                    f"| `{path}` | {', '.join(sorted(entry['hooks']))} | "
+                    f"{', '.join(sorted(entry['actions']))} | {entry['count']} | "
                     f"{entry['read_bytes']} | {agree_val} |"
                 )
             add("")

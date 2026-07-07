@@ -138,6 +138,47 @@ class AnalyzerActionMismatchTest(unittest.TestCase):
         self.assertEqual(mismatch["items"][0]["allowed"], ["read"])
         self.assertEqual(mismatch["items"][0]["extra"], ["create", "write"])
 
+    def test_inode_unlink_is_judged_as_delete_action(self) -> None:
+        # inode_unlink 是删除文件的 LSM hook：IR 只允许 read 时，删除应作为未授权的 delete 动作被判定。
+        ir = {
+            "policies": [
+                {
+                    "effect": "allow",
+                    "objects": [
+                        {"type": "file", "identifier": "/workspace/test_a.txt", "actions": ["read"]},
+                    ],
+                }
+            ]
+        }
+        self.write_round(
+            ir=ir,
+            lsm=[
+                {
+                    "event_id": "file-delete",
+                    "hook_name": "inode_unlink",
+                    "result": "allow",
+                    "return_value": 0,
+                    "pid": 1000,
+                    "tid": 1000,
+                    "timestamp_mono_ns": 1,
+                    "path": "/workspace/test_a.txt",
+                    "category": "workspace",
+                    "resource_role": "declared_resource",
+                    "tool_call_id": "call-1",
+                    "tool_name": "exec",
+                    "related_event_id": None,
+                    "args": {"pathname": "/workspace/test_a.txt", "inode": 123},
+                }
+            ],
+        )
+
+        result = analyze_round(self.round_dir)
+
+        self.assertTrue(result["is_anomaly"])
+        mismatch = next(item for item in result["anomaly_types"] if item["type"] == "文件访问出现未授权动作")
+        self.assertEqual(mismatch["items"][0]["allowed"], ["read"])
+        self.assertEqual(mismatch["items"][0]["extra"], ["delete"])
+
     def test_lsm_only_network_action_mismatch_marks_round_anomalous(self) -> None:
         ir = {
             "policies": [
