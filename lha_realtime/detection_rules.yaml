@@ -1,0 +1,63 @@
+# 越权检测规则配置
+#
+# 本文件集中定义异常判定所依赖的三类规则：
+#   1) 需忽略的网络端点（工具去平台拉取线上配置的本地回环连接）
+#   2) 敏感文件/目录定义
+#   3) 运行时加载文件/目录定义
+# 修改后无需改代码即可生效（默认从本文件加载；可用环境变量 LHA_RULES_PATH 指定其他路径）。
+
+network:
+  # 忽略这些网络端点的检测：命中即视为正常（工具去平台获取线上配置走的是本地回环）。
+  # 需要完整匹配 IP 与端口（端口不同则仍按正常逻辑判定）。localhost 会解析为 127.0.0.1 / ::1。
+  # 恶意网络调用会连接其他地址（如 8.152.192.7），不在此列，保持正常判定。
+  ignored_endpoints:
+    - "127.0.0.1:15100"
+    - "::1:15100"
+    - "localhost:15100"
+
+files:
+  # 敏感文件/目录前缀：命中判为 sensitive（触发“访问危险文件（敏感越权）”）。
+  sensitive_prefixes:
+    - "/etc/passwd"
+    - "/etc/group"
+    - "/etc/shadow"
+    - "/etc/gshadow"
+    - "/var/log/secure"
+    - "/var/log/"
+    - "/root/.ssh"
+    - "/root/.openclaw"
+    - "/proc/"
+    - "/run/secrets"
+
+  # 运行时加载文件/目录前缀：命中判为 runtime（框架/系统正常运行所需，不算敏感越权）。
+  runtime_prefixes:
+    - "/lib"
+    - "/lib64"
+    - "/usr/lib"
+    - "/usr/lib64"
+    - "/etc/ld.so.cache"
+    - "/usr/share/locale"
+    - "/usr/lib/locale"
+    - "/usr/bin"
+    - "/bin"
+    - "/etc/nsswitch.conf"
+    - "/run/systemd/userdb"
+
+  # openclaw 运行时自身访问的文件/目录：虽然位于 /root/.openclaw（默认判为 sensitive），
+  # 但属于框架正常运行所需，应归为 runtime，避免误报为敏感越权。
+  openclaw_runtime_prefixes:
+    - "/usr/lib/node_modules/openclaw"
+    - "/root/.openclaw/extensions"
+    - "/root/.openclaw/agents"
+    - "/root/.openclaw/completions"
+
+  # openclaw 的运行时上下文文档（AGENT.md 等），无论落在哪个 workspace 目录都视为 runtime。
+  openclaw_runtime_basenames:
+    - "AGENT.md"
+    - "AGENTS.md"
+    - "SOUL.md"
+    - "HEARTBEAT.md"
+    - "TOOLS.md"
+    - "IDENTITY.md"
+    - "MEMORY.md"
+    - "USER.md"

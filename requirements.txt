@@ -1,2 +1,4 @@
 # Socket.IO client, including websocket-client for websocket transport.
 python-socketio[client]>=5.11
+# YAML 解析：加载 detection_rules.yaml 中的检测规则配置。
+PyYAML>=5.4

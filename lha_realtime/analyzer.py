@@ -17,6 +17,14 @@ from urllib import error, request
 
 from .config import SETTINGS
 from .logging_utils import setup_logging
+from .rules import (
+    IGNORED_NETWORK_ENDPOINTS,
+    OPENCLAW_RUNTIME_BASENAMES,
+    OPENCLAW_RUNTIME_PREFIXES,
+    RUNTIME_PREFIXES,
+    SENSITIVE_PREFIXES,
+    is_ignored_endpoint,
+)
 
 
 PUSH_MARKER_NAME = "analysis_kernel_report_push.json"
@@ -326,10 +334,16 @@ def connect_endpoints(syscalls: list) -> dict:
 
 
 def parse_network_activity(lsm: list, syscalls: list) -> dict:
-    """汇总该 round 的 send / receive 网络行为。
+    """汇总该 round 的 send / receive 网络行为，并按忽略端点做整轮判定。
 
     只要出现 send/receive 系统调用或对应 LSM hook 就计入，不论目标是外部主机、
     本地 IPC 还是监控端口；并 best-effort 关联目标端点用于报告展示。
+
+    针对 detection_rules.yaml 中配置的忽略端点（如工具去平台拉取线上配置的
+    127.0.0.1:15100 / ::1:15100 / localhost:15100，端口需完整匹配）：若本轮所有
+    可识别端点都落在忽略集合内，则整轮网络行为按正常处理（effective actions 置空、
+    展示端点仅保留未忽略者）；只要出现其他端点（如恶意的 8.152.192.7），或无法识别
+    任何端点，则保持原有判定逻辑。
     """
     conns = connect_endpoints(syscalls)
 
@@ -345,29 +359,50 @@ def parse_network_activity(lsm: list, syscalls: list) -> dict:
                 break
         return chosen if chosen is not None else records[0][1]
 
-    actions = set()
-    endpoints = set()
+    observed_actions = set()
+    all_endpoints = set()
+
+    # connect 的目标本身也纳入端点集合，即使之后没有 send/recv（例如恶意 connect 探测）。
+    for records in conns.values():
+        for _ts, endpoint in records:
+            if endpoint:
+                all_endpoints.add(endpoint)
+
     for hook in lsm:
         hook_actions = network_hook_actions(hook.get("hook_name"))
         if not hook_actions:
             continue
-        actions.update(hook_actions)
+        observed_actions.update(hook_actions)
         detail = network_detail(hook)
         if detail:
-            endpoints.add(detail)
+            all_endpoints.add(detail)
 
     for syscall in syscalls:
         action = syscall.get("action")
         if action in NETWORK_SEND_ACTIONS:
-            actions.add("send")
+            observed_actions.add("send")
         elif action in NETWORK_RECV_ACTIONS:
-            actions.add("receive")
+            observed_actions.add("receive")
         else:
             continue
         endpoint = lookup(syscall.get("pid"), syscall.get("fd"), syscall.get("timestamp_mono_ns", 0))
         if endpoint:
-            endpoints.add(endpoint)
-    return {"actions": actions, "endpoints": endpoints}
+            all_endpoints.add(endpoint)
+
+    ignored_endpoints = {e for e in all_endpoints if is_ignored_endpoint(e)}
+    remaining_endpoints = all_endpoints - ignored_endpoints
+    # 存在可识别端点且全部属于忽略集合 → 整轮网络视为正常（工具拉取线上配置）。
+    suppressed = bool(all_endpoints) and not remaining_endpoints
+    effective_actions = set() if suppressed else observed_actions
+
+    return {
+        "actions": effective_actions,
+        "endpoints": remaining_endpoints,
+        "observed_actions": observed_actions,
+        "all_endpoints": all_endpoints,
+        "ignored_endpoints": ignored_endpoints,
+        "suppressed": suppressed,
+    }
 
 
 REGEX_HINTS = ("^", "$", "+", "|", "(", ")", "{", "}", "\\", ".*")
@@ -454,50 +489,9 @@ def is_allowed(path: str | None, allowed_files: set) -> bool:
     return False
 
 
-SENSITIVE_PREFIXES = (
-    "/etc/passwd",
-    "/etc/group",
-    "/etc/shadow",
-    "/etc/gshadow",
-    "/var/log/secure",
-    "/var/log/",
-    "/root/.ssh",
-    "/root/.openclaw",
-    "/proc/",
-    "/run/secrets",
-)
-RUNTIME_PREFIXES = (
-    "/lib",
-    "/lib64",
-    "/usr/lib",
-    "/usr/lib64",
-    "/etc/ld.so.cache",
-    "/usr/share/locale",
-    "/usr/lib/locale",
-    "/usr/bin",
-    "/bin",
-    "/etc/nsswitch.conf",
-    "/run/systemd/userdb",
-)
-# openclaw 运行时自身访问的文件/目录：虽然位于 /root/.openclaw（默认判为 sensitive），
-# 但属于框架正常运行所需，应归为 runtime，避免误报为敏感越权。
-OPENCLAW_RUNTIME_PREFIXES = (
-    "/usr/lib/node_modules/openclaw",
-    "/root/.openclaw/extensions",
-    "/root/.openclaw/agents",
-    "/root/.openclaw/completions",
-)
-# openclaw 的运行时上下文文档（AGENT.md 等），无论落在哪个 workspace 目录都视为 runtime。
-OPENCLAW_RUNTIME_BASENAMES = (
-    "AGENT.md",
-    "AGENTS.md",
-    "SOUL.md",
-    "HEARTBEAT.md",
-    "TOOLS.md",
-    "IDENTITY.md",
-    "MEMORY.md",
-    "USER.md",
-)
+# 敏感文件、运行时加载文件、openclaw 运行时文件/文档的定义均在 detection_rules.yaml 中配置，
+# 由 lha_realtime.rules 加载为 SENSITIVE_PREFIXES / RUNTIME_PREFIXES /
+# OPENCLAW_RUNTIME_PREFIXES / OPENCLAW_RUNTIME_BASENAMES。
 
 
 def is_openclaw_runtime(path: str) -> bool:
@@ -639,6 +633,8 @@ def analyze_round(round_dir: Path) -> dict:
         "allowed_network_actions": sorted(allowed["network_actions"]),
         "network_observed": sorted(net_observed["actions"]),
         "network_endpoints": sorted(net_observed["endpoints"]),
+        "network_suppressed": net_observed["suppressed"],
+        "network_ignored_endpoints": sorted(net_observed["ignored_endpoints"]),
         "is_anomaly": anomaly["is_anomaly"],
         "anomaly_types": anomaly["types"],
         "user_actions": user_actions,
@@ -656,7 +652,8 @@ def analyze_round(round_dir: Path) -> dict:
     sensitive = sum(1 for violation in violations if violation["category"] == "sensitive")
     log.info(
         "[%s] 分析完成 elapsed=%.3fs lsm_total=%d syscall_total=%d kernel_file_ops=%d "
-        "violations=%d sensitive=%d judge_mismatch=%d",
+        "violations=%d sensitive=%d judge_mismatch=%d net_suppressed=%s net_ignored=%s "
+        "net_observed=%s net_endpoints=%s",
         result["round_id"],
         time.monotonic() - started,
         counts["lsm_total"],
@@ -665,6 +662,10 @@ def analyze_round(round_dir: Path) -> dict:
         counts["violations"],
         sensitive,
         counts["judge_mismatch"],
+        net_observed["suppressed"],
+        sorted(net_observed["ignored_endpoints"]),
+        sorted(net_observed["observed_actions"]),
+        result["network_endpoints"],
     )
     return result
 
@@ -704,7 +705,7 @@ def write_outputs(round_dir: Path, result: dict) -> tuple[Path, Path]:
                 )
     else:
         add("- 异常类型: 无")
-    add("> 说明: `delete` 动作当前无对应 syscall/hook，暂不参与判定；网络只要出现 send/receive 行为即计入（不论目标是外部主机、本地 IPC 还是监控端口），未被 IR 授权即判为异常，不做 URL 级精确匹配。\n")
+    # add("> 说明: `delete` 动作当前无对应 syscall/hook，暂不参与判定；网络只要出现 send/receive 行为即计入（不论目标是外部主机、本地 IPC 还是监控端口），未被 IR 授权即判为异常，不做 URL 级精确匹配。\n")
 
     add(f"- 报告生成时间: {datetime.now().isoformat(timespec='seconds')}")
     add(f"- 会话: `{result.get('session_key')}`")
@@ -783,7 +784,13 @@ def write_outputs(round_dir: Path, result: dict) -> tuple[Path, Path]:
             add("")
 
     add("### 网络\n")
-    if not net_viol:
+    if result.get("network_suppressed"):
+        ignored = ", ".join(f"`{e}`" for e in result.get("network_ignored_endpoints", []))
+        add(
+            "无（本轮网络连接目标均为忽略端点"
+            f"{'：' + ignored if ignored else ''}，为工具拉取线上配置，按正常处理）\n"
+        )
+    elif not net_viol:
         add("无\n")
     else:
         by_group: dict = {}

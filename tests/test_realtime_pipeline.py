@@ -177,6 +177,141 @@ class AnalyzerActionMismatchTest(unittest.TestCase):
         self.assertEqual(mismatch["allowed"], ["send"])
         self.assertEqual(mismatch["extra"], ["receive"])
 
+    def test_localhost_15100_only_network_is_not_anomalous(self) -> None:
+        # 工具去平台拉取线上配置：连接仅落在 127.0.0.1:15100 / ::1:15100，整轮网络按正常处理。
+        ir = {"policies": []}
+        self.write_round(
+            ir=ir,
+            lsm=[
+                {
+                    "event_id": "net-send",
+                    "hook_name": "socket_sendmsg",
+                    "result": "allow",
+                    "return_value": 0,
+                    "pid": 1000,
+                    "tid": 1000,
+                    "timestamp_mono_ns": 5,
+                    "category": "unknown",
+                    "fd": 0,
+                    "args": {"decision_scope": "collector_program", "fd": 0},
+                },
+                {
+                    "event_id": "net-recv",
+                    "hook_name": "socket_recvmsg",
+                    "result": "allow",
+                    "return_value": 0,
+                    "pid": 1000,
+                    "tid": 1000,
+                    "timestamp_mono_ns": 6,
+                    "category": "unknown",
+                    "fd": 0,
+                    "args": {"decision_scope": "collector_program", "fd": 0},
+                },
+            ],
+            syscalls=[
+                {
+                    "action": "connect",
+                    "event_id": "sc-connect-v4",
+                    "pid": 1000,
+                    "fd": 3,
+                    "timestamp_mono_ns": 1,
+                    "args": {"remote_ip": "127.0.0.1", "remote_port": "15100", "sockfd": 3},
+                },
+                {
+                    "action": "connect",
+                    "event_id": "sc-connect-v6",
+                    "pid": 1000,
+                    "fd": 3,
+                    "timestamp_mono_ns": 2,
+                    "args": {"remote_ip": "::1", "remote_port": "15100", "sockfd": 3},
+                },
+                {
+                    "action": "sendto",
+                    "event_id": "sc-send",
+                    "pid": 1000,
+                    "fd": 3,
+                    "timestamp_mono_ns": 3,
+                    "args": {"fd": 3},
+                },
+                {
+                    "action": "recvmsg",
+                    "event_id": "sc-recv",
+                    "pid": 1000,
+                    "fd": 3,
+                    "timestamp_mono_ns": 4,
+                    "args": {"fd": 3},
+                },
+            ],
+        )
+
+        result = analyze_round(self.round_dir)
+
+        self.assertTrue(result["network_suppressed"])
+        self.assertEqual(result["network_observed"], [])
+        self.assertEqual(result["network_endpoints"], [])
+        self.assertFalse(
+            any(item["type"] == "网络访问出现未授权动作" for item in result["anomaly_types"])
+        )
+        self.assertFalse(result["is_anomaly"])
+
+    def test_mixed_localhost_and_external_endpoint_still_flags_external(self) -> None:
+        # 同时出现 127.0.0.1:15100（忽略）与 8.152.192.7:443（恶意）：仍判异常，只保留外部端点。
+        ir = {"policies": []}
+        self.write_round(
+            ir=ir,
+            lsm=[
+                {
+                    "event_id": "net-send",
+                    "hook_name": "socket_sendmsg",
+                    "result": "allow",
+                    "return_value": 0,
+                    "pid": 1000,
+                    "tid": 1000,
+                    "timestamp_mono_ns": 5,
+                    "category": "unknown",
+                    "fd": 0,
+                    "args": {"fd": 0},
+                }
+            ],
+            syscalls=[
+                {
+                    "action": "connect",
+                    "event_id": "sc-connect-local",
+                    "pid": 1000,
+                    "fd": 3,
+                    "timestamp_mono_ns": 1,
+                    "args": {"remote_ip": "127.0.0.1", "remote_port": "15100", "sockfd": 3},
+                },
+                {
+                    "action": "connect",
+                    "event_id": "sc-connect-ext",
+                    "pid": 1000,
+                    "fd": 4,
+                    "timestamp_mono_ns": 2,
+                    "args": {"remote_ip": "8.152.192.7", "remote_port": "443", "sockfd": 4},
+                },
+                {
+                    "action": "sendto",
+                    "event_id": "sc-send-ext",
+                    "pid": 1000,
+                    "fd": 4,
+                    "timestamp_mono_ns": 3,
+                    "args": {"fd": 4},
+                },
+            ],
+        )
+
+        result = analyze_round(self.round_dir)
+
+        self.assertFalse(result["network_suppressed"])
+        self.assertEqual(result["network_endpoints"], ["8.152.192.7:443"])
+        self.assertIn("127.0.0.1:15100", result["network_ignored_endpoints"])
+        self.assertTrue(result["is_anomaly"])
+        mismatch = next(
+            item for item in result["anomaly_types"] if item["type"] == "网络访问出现未授权动作"
+        )
+        self.assertEqual(mismatch["endpoints"], ["8.152.192.7:443"])
+
     def test_d04795d0_lsm_socket_hooks_mark_round_anomalous(self) -> None:
         fixture = Path(__file__).resolve().parents[1] / "input" / "d04795d0"
         if not fixture.is_dir():
