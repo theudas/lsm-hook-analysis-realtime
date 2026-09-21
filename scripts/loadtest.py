@@ -76,11 +76,25 @@ def find_templates(input_dir: Path, limit: int | None = None) -> list[dict]:
                 kernel_payload = json.loads(kernel_path.read_text(encoding="utf-8"))
             except json.JSONDecodeError:
                 kernel_payload = {}
+        # 就绪门控要求四类消息齐备，其中 IR 只能来自独立的 round_ir_ready，
+        # 或旧上游内嵌在 round_end.ir_json 里。ir.json 落盘的就是 round_ir_ready
+        # 的原始 payload，直接克隆即可。缺 IR 的 round 永远进不了 ready，
+        # 当模板只会让它们卡在 receiving，把吞吐测成假的瓶颈。
+        ir_path = d / "ir.json"
+        ir_payload = {}
+        if ir_path.is_file():
+            try:
+                ir_payload = json.loads(ir_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                ir_payload = {}
+        if not ir_payload.get("ir_json") and not end_payload.get("ir_json"):
+            continue
         templates.append(
             {
                 "name": d.name,
                 "end_payload": end_payload,
                 "kernel_payload": kernel_payload,
+                "ir_payload": ir_payload,
                 # Point the kernel file refs at the already-materialized jsonl in
                 # this template dir so copy_kernel_file actually copies bytes.
                 "syscall_src": str(sysc.resolve()),
@@ -92,7 +106,7 @@ def find_templates(input_dir: Path, limit: int | None = None) -> list[dict]:
     return templates
 
 
-def make_messages(template: dict, round_id: str) -> tuple[dict, dict, dict]:
+def make_messages(template: dict, round_id: str) -> list[dict]:
     start = {
         "push_type": "round_start",
         "round_id": round_id,
@@ -112,7 +126,19 @@ def make_messages(template: dict, round_id: str) -> tuple[dict, dict, dict]:
     kernel["is_mock"] = True
     kernel["kernel_syscall_seq"] = template["syscall_src"]
     kernel["kernel_lsm_hook_result"] = template["lsm_src"]
-    return start, end, kernel
+
+    messages = [start, end, kernel]
+
+    # 新上游把 IR 单独推成 round_ir_ready；只有旧上游才内嵌在 round_end 里。
+    # 模板带独立 IR 时补上第四条消息，否则 round 永远等不齐。
+    ir_payload = template.get("ir_payload") or {}
+    if ir_payload.get("ir_json"):
+        ir = dict(ir_payload)
+        ir["push_type"] = "round_ir_ready"
+        ir["round_id"] = round_id
+        ir["is_mock"] = True
+        messages.append(ir)
+    return messages
 
 
 def percentile(values: list[float], pct: float) -> float:
@@ -222,12 +248,11 @@ def run_load_test(args: argparse.Namespace) -> int:
     for i in range(args.rounds):
         tmpl = templates[i % len(templates)]
         round_id = f"lt-{i:08d}"
-        start_msg, end_msg, kernel_msg = make_messages(tmpl, round_id)
+        msgs = make_messages(tmpl, round_id)
         now = time.monotonic()
         send_at[round_id] = now
-        store.enqueue_message(start_msg)
-        store.enqueue_message(end_msg)
-        store.enqueue_message(kernel_msg)
+        for msg in msgs:
+            store.enqueue_message(msg)
         if interval:
             target = t_start + (i + 1) * interval
             slack = target - time.monotonic()
@@ -271,7 +296,8 @@ def run_load_test(args: argparse.Namespace) -> int:
           + ("" if completed == args.rounds else f"  (DRAIN INCOMPLETE — capacity exceeded or timeout)"))
     print(f"target enqueue rate : {args.rate:.1f} rounds/s")
     print(f"achieved enqueue    : {achieved_rate:.1f} rounds/s")
-    print(f"sustained throughput: {sustained:.1f} rounds/s  (completed / total wall {drain_wall:.2f}s)")
+    print(f"sustained throughput: {sustained:.1f} rounds/s  (completed / total wall {drain_wall:.2f}s)"
+          + ("" if completed == args.rounds else "  [仅供参考：未全部完成，wall 被 drain-timeout 拉长]"))
     print(f"backlog peak        : pending_msgs={max_pending}  queued_jobs={max_queued}")
     print(f"backlog at end      : pending_msgs={final_pending}  queued_jobs={final_queued}")
     if latencies:
@@ -279,6 +305,18 @@ def run_load_test(args: argparse.Namespace) -> int:
         print(f"   p50={percentile(latencies,0.50):.0f}  p90={percentile(latencies,0.90):.0f}  "
               f"p95={percentile(latencies,0.95):.0f}  p99={percentile(latencies,0.99):.0f}  "
               f"max={max(latencies):.0f}  mean={statistics.fmean(latencies):.0f}")
+    # 未完成的 round 分两种，判定前必须先分开：
+    #   - 仍停在 receiving：四类消息没齐，是数据问题，不是容量问题；
+    #   - 停在 ready/queued/running：真的排不过来，才是容量问题。
+    stuck = store._conn.execute(
+        "SELECT status, COUNT(*) AS n FROM round_states GROUP BY status"
+    ).fetchall()
+    by_status = {row["status"]: row["n"] for row in stuck}
+    not_ready = by_status.get("receiving", 0)
+    if not_ready:
+        print(f"rounds never ready  : {not_ready}  (四类消息未齐，未进入分析队列)")
+    print(f"round states        : " + "  ".join(f"{k}={v}" for k, v in sorted(by_status.items())))
+
     # Backlog should stay small relative to the offered rate. A backlog larger
     # than ~1s of offered load means a stage (ingest or analysis) can't keep up.
     backlog_budget = max(10, args.rate)
@@ -288,6 +326,11 @@ def run_load_test(args: argparse.Namespace) -> int:
     elif completed == args.rounds:
         bottleneck = "ingest (pending msgs)" if max_pending > max_queued else "analysis (queued jobs)"
         verdict = f"OVER CAPACITY — backlog built up, bottleneck = {bottleneck} (drained only because load stopped)"
+    elif not_ready:
+        verdict = (
+            f"INVALID RUN — {not_ready} round(s) never reached ready (四类消息未齐)；"
+            "本次未测到容量上限，吞吐数字不可用"
+        )
     else:
         verdict = "OVER CAPACITY — drain did not complete within timeout"
     print(f"verdict             : {verdict}")
