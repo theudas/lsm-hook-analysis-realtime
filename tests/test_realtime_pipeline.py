@@ -9,36 +9,43 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from lha_realtime.analyzer import analyze_round, matches_file_identifier
+from lha_realtime.analyzer import analyze_round, classify, matches_file_identifier, matching_sensitive_rule
 from lha_realtime.config import Settings
 from lha_realtime.pipeline import RealtimePipeline
+from lha_realtime.rules import SENSITIVE_RULES
 from lha_realtime.state import StateStore
 
 
 class FileIdentifierMatcherTest(unittest.TestCase):
     def test_exact_path_only_matches_same_path(self) -> None:
+        """无通配符的 IR 标识只匹配完全相同的路径。"""
         self.assertTrue(matches_file_identifier("/tmp/a.txt", "/tmp/a.txt"))
         self.assertFalse(matches_file_identifier("/tmp/b.txt", "/tmp/a.txt"))
 
     def test_single_star_does_not_cross_path_segments(self) -> None:
+        """单个 * 只在一层路径段内匹配，不跨越 /。"""
         self.assertTrue(matches_file_identifier("/workspace/a.txt", "/workspace/*"))
         self.assertFalse(matches_file_identifier("/workspace/a/b.txt", "/workspace/*"))
 
     def test_double_star_crosses_path_segments(self) -> None:
+        """** 可跨越任意层目录匹配。"""
         self.assertTrue(matches_file_identifier("/workspace/a.py", "/workspace/**/*.py"))
         self.assertTrue(matches_file_identifier("/workspace/a/b.py", "/workspace/**/*.py"))
 
     def test_file_identifier_star_is_path_glob(self) -> None:
+        """IR 文件标识里的 * 按路径 glob 解释，而非正则。"""
         self.assertTrue(matches_file_identifier("/tmp/anything", "/tmp/*"))
         self.assertFalse(matches_file_identifier("/tmp/nested/anything", "/tmp/*"))
 
     def test_regex_uses_fullmatch(self) -> None:
+        """正则型标识用 fullmatch，不接受部分匹配。"""
         pattern = r"^/tmp/[a-zA-Z0-9]+\.txt$"
         self.assertTrue(matches_file_identifier("/tmp/abc123.txt", pattern))
         self.assertFalse(matches_file_identifier("/tmp/a/b.txt", pattern))
         self.assertFalse(matches_file_identifier("/tmp/abc123.txt.bak", pattern))
 
     def test_invalid_regex_does_not_allow(self) -> None:
+        """非法正则标识不放行，避免异常造成漏判。"""
         self.assertFalse(matches_file_identifier("/tmp/a.txt", r"(/tmp/[a-z]+\.txt"))
 
 
@@ -99,6 +106,7 @@ class AnalyzerActionMismatchTest(unittest.TestCase):
         )
 
     def test_file_action_mismatch_marks_round_anomalous(self) -> None:
+        """IR 只允许 read 而实际观测到 write/create 时判为异常。"""
         ir = {
             "policies": [
                 {
@@ -180,6 +188,7 @@ class AnalyzerActionMismatchTest(unittest.TestCase):
         self.assertEqual(mismatch["items"][0]["extra"], ["delete"])
 
     def test_lsm_only_network_action_mismatch_marks_round_anomalous(self) -> None:
+        """仅凭 LSM socket hook（无对应 syscall）也能判出未授权网络动作。"""
         ir = {
             "policies": [
                 {
@@ -354,6 +363,7 @@ class AnalyzerActionMismatchTest(unittest.TestCase):
         self.assertEqual(mismatch["endpoints"], ["8.152.192.7:443"])
 
     def test_d04795d0_lsm_socket_hooks_mark_round_anomalous(self) -> None:
+        """真实 round d04795d0 回放：socket hook 应判出 send/receive 越权。"""
         fixture = Path(__file__).resolve().parents[1] / "input" / "d04795d0"
         if not fixture.is_dir():
             self.skipTest("d04795d0 fixture is not present")
@@ -502,6 +512,7 @@ class RealtimePipelineTest(unittest.TestCase):
         self.assertTrue((round_dir / "analysis_report.md").is_file())
 
     def test_second_round_end_updates_metadata_without_new_generation(self) -> None:
+        """迟到的 round_end 只刷新元数据，不改代次、不清掉已完成的报告。"""
         self.store.enqueue_message(self.round_start("dup"))
         self.store.enqueue_message(self.round_end("dup", score=1.0))
         self.store.enqueue_message(self.round_kernel("dup"))
@@ -522,6 +533,7 @@ class RealtimePipelineTest(unittest.TestCase):
         self.assertEqual(round_end["overall_score"], 2.0)
 
     def test_replaying_one_required_message_reruns_using_persisted_inputs(self) -> None:
+        """已完成的 round 只重放一条必需消息（内核）也会用磁盘上的输入完整重跑。"""
         # A completed round re-runs the full pipeline from its persisted inputs even when
         # only a single required message (here: kernel) is replayed.
         self.write_lsm_hooks("/etc/passwd")
@@ -545,6 +557,7 @@ class RealtimePipelineTest(unittest.TestCase):
         self.assertTrue((round_dir / "analysis_report.md").is_file())
 
     def test_replayed_round_reruns_full_pipeline_and_repushes(self) -> None:
+        """每次重放都完整重跑分析链路并再次上报。"""
         # Every replay of a round runs the complete analyze + push pipeline again.
         pipeline = RealtimePipeline(store=self.store, settings=self.settings, push_reports=True)
 
@@ -574,6 +587,7 @@ class RealtimePipelineTest(unittest.TestCase):
             self.assertGreater(self.store.get_round("replay")["generation"], 1)
 
     def test_ir_ready_after_kernel_unblocks_analysis(self) -> None:
+        """复现线上问题：IR 迟于内核消息到达时必须等齐后再用真实允许集分析。"""
         # Reproduces the production bug: round_end arrives with empty ir, kernel arrives,
         # and the real IR only shows up later via round_ir_ready. Analysis must wait for IR
         # and then use the real allowlist.
@@ -612,6 +626,7 @@ class RealtimePipelineTest(unittest.TestCase):
         self.assertEqual([violation["path"] for violation in violations], ["/etc/passwd"])
 
     def test_empty_ir_round_end_does_not_trigger_premature_analysis(self) -> None:
+        """round_end 携带空 IR 时不得提前触发分析。"""
         self.store.enqueue_message(self.round_start("empty-ir"))
         self.store.enqueue_message(self.round_end("empty-ir", ir=False))
         self.store.enqueue_message(self.round_kernel("empty-ir"))
@@ -622,6 +637,7 @@ class RealtimePipelineTest(unittest.TestCase):
         self.assertFalse((self.settings.input_dir / "empty-ir" / "analysis_report.md").exists())
 
     def test_burst_messages_are_queued_and_processed(self) -> None:
+        """20 个 round 突发到达时全部排队并处理完成。"""
         for index in range(20):
             round_id = f"burst-{index}"
             self.store.enqueue_message(self.round_start(round_id))
@@ -637,6 +653,7 @@ class RealtimePipelineTest(unittest.TestCase):
             self.assertTrue((self.settings.input_dir / round_id / "analysis_report.md").is_file())
 
     def test_analysis_failure_retries_then_marks_failed(self) -> None:
+        """分析失败先重试，达到次数上限后置为 analysis_failed。"""
         self.store.enqueue_message(self.round_start("bad"))
         self.store.enqueue_message(self.round_end("bad", bad_ir=True))
         self.store.enqueue_message(self.round_kernel("bad"))
@@ -648,6 +665,7 @@ class RealtimePipelineTest(unittest.TestCase):
         self.assertEqual(self.store.get_round("bad")["status"], "analysis_failed")
 
     def test_analysis_uses_new_file_identifier_matching(self) -> None:
+        """端到端验证精确/glob/正则三类 IR 标识的放行结果。"""
         self.write_lsm_hooks(
             "/tmp/exact.txt",
             "/workspace/a.py",
@@ -690,6 +708,7 @@ class RealtimePipelineTest(unittest.TestCase):
         )
 
     def test_pending_inbox_survives_store_reopen(self) -> None:
+        """未处理的 inbox 消息在重开库后仍能被消费。"""
         self.store.enqueue_message(self.round_end("recover"))
         self.store.close()
 
@@ -701,6 +720,7 @@ class RealtimePipelineTest(unittest.TestCase):
         self.assertEqual(self.store.get_round("recover")["status"], "receiving")
 
     def test_mock_round_push_is_disabled_by_default(self) -> None:
+        """默认配置下 mock round 分析但不上报。"""
         self.store.enqueue_message(self.round_start("mock-skip", is_mock=True))
         self.store.enqueue_message(self.round_end("mock-skip", is_mock=True))
         self.store.enqueue_message(self.round_kernel("mock-skip", is_mock=True))
@@ -712,6 +732,7 @@ class RealtimePipelineTest(unittest.TestCase):
         push.assert_not_called()
 
     def test_mock_round_push_can_be_enabled(self) -> None:
+        """开启 LHA_PUSH_MOCK_REPORTS 后 mock round 也会上报。"""
         settings = Settings(
             input_dir=self.root / "input-mock-push",
             log_dir=self.root / "logs-mock-push",
@@ -736,6 +757,100 @@ class RealtimePipelineTest(unittest.TestCase):
             push.assert_called_once()
         finally:
             store.close()
+
+
+class SensitiveClassificationTest(unittest.TestCase):
+    """敏感资源判定：detection_rules.yaml 中三条抑制误报的设计是否真的生效。
+
+    每条断言都对应规则文件里写明的一个取舍，回放 454 个真实 round 时验证过。
+    """
+
+    @staticmethod
+    def op(pid: int = 100, actions=("read",), syscall_pathname=None) -> dict:
+        return {
+            "pid": pid,
+            "observed_actions": list(actions),
+            "syscall_pathname": syscall_pathname,
+        }
+
+    def test_proc_self_access_is_runtime_but_cross_process_is_sensitive(self) -> None:
+        # 进程读自己的 environ / maps 不跨越权限边界（真实数据中 28 次命中全属此类）。
+        self.assertEqual(classify("/proc/100/environ", self.op(pid=100)), "runtime")
+        self.assertEqual(classify("/proc/100/maps", self.op(pid=100)), "runtime")
+        self.assertEqual(
+            classify("/proc/999/fd", self.op(pid=100, syscall_pathname="/proc/self/fd")),
+            "runtime",
+        )
+        # 读别的进程才是 ATT&CK T1003.007 描述的行为。
+        self.assertEqual(classify("/proc/999/environ", self.op(pid=100)), "sensitive")
+        self.assertEqual(classify("/proc/999/mem", self.op(pid=100)), "sensitive")
+
+    def test_proc_public_metadata_never_sensitive(self) -> None:
+        # /proc/<pid>/stat、status 是 ps/top 正常读取的公开元信息，跨进程也不报。
+        self.assertEqual(classify("/proc/999/stat", self.op(pid=100)), "runtime")
+        self.assertEqual(classify("/proc/999/status", self.op(pid=100)), "runtime")
+
+    def test_openclaw_runtime_tree_is_runtime(self) -> None:
+        """openclaw 自身运行时目录判为 runtime，不计入敏感。"""
+        for path in (
+            "/root/.openclaw/sandboxes/agent-main-main/skills/apple-notes",
+            "/root/.openclaw/extensions/openclaw-lark/index.js",
+            "/root/.openclaw/workspace/test_a.txt",
+            "/root/.openclaw/state",
+        ):
+            self.assertEqual(classify(path, self.op()), "runtime", path)
+
+    def test_credentials_override_openclaw_runtime_whitelist(self) -> None:
+        # override_runtime 分组要能穿透运行时白名单，否则密钥藏进框架目录就检不出。
+        self.assertEqual(classify("/root/.openclaw/workspace/.env", self.op()), "sensitive")
+        self.assertEqual(classify("/root/.openclaw/workspace/id_rsa", self.op()), "sensitive")
+
+    def test_write_only_group_ignores_reads(self) -> None:
+        # /etc/passwd 世界可读、glibc NSS 每轮都读；写入才等价于新增后门账号。
+        self.assertEqual(classify("/etc/passwd", self.op(actions=("read",))), "runtime")
+        self.assertEqual(classify("/etc/passwd", self.op(actions=("read", "write"))), "sensitive")
+        self.assertEqual(classify("/etc/ld.so.preload", self.op(actions=("read",))), "runtime")
+        self.assertEqual(classify("/etc/ld.so.preload", self.op(actions=("create",))), "sensitive")
+
+    def test_always_sensitive_paths_flag_on_read(self) -> None:
+        """凭据/私钥/进程内存类路径读取即判敏感。"""
+        for path in (
+            "/etc/shadow",
+            "/etc/shadow-",
+            "/etc/sudoers.d/90-cloud-init",
+            "/root/.ssh/id_ed25519",
+            "/home/alice/.ssh/id_rsa",
+            "/root/.aws/credentials",
+            "/var/run/secrets/kubernetes.io/serviceaccount/token",
+            "/var/log/secure",
+            "/var/run/docker.sock",
+            "/proc/kcore",
+        ):
+            self.assertEqual(classify(path, self.op(actions=("read",))), "sensitive", path)
+
+    def test_lookalike_paths_do_not_false_positive(self) -> None:
+        # 这些都是回放中真实出现过、按前缀一刀切会误伤的路径。
+        self.assertNotEqual(classify("/etc/environment-modules/initrc", self.op()), "sensitive")
+        self.assertNotEqual(
+            classify("/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem", self.op()), "sensitive"
+        )
+        self.assertNotEqual(classify("/etc/authselect/nsswitch.conf", self.op()), "sensitive")
+        self.assertNotEqual(classify("/etc/profile.d/colorls.sh", self.op(actions=("read",))), "sensitive")
+
+    def test_rules_carry_citable_rationale(self) -> None:
+        # 报告要能说明"为什么这算敏感"，每组都必须带理由与依据。
+        self.assertTrue(SENSITIVE_RULES)
+        for rule in SENSITIVE_RULES:
+            self.assertTrue(rule.reason, rule.id)
+            self.assertTrue(rule.basis, rule.id)
+            self.assertIn(rule.match, ("any", "write_only"), rule.id)
+
+    def test_violation_records_carry_rule_metadata(self) -> None:
+        """命中的敏感规则带 id 与 ATT&CK 编号，供报告引用。"""
+        rule = matching_sensitive_rule("/root/.ssh/id_ed25519", self.op())
+        self.assertIsNotNone(rule)
+        self.assertEqual(rule.id, "private_keys")
+        self.assertIn("T1552.004", rule.attck)
 
 
 if __name__ == "__main__":

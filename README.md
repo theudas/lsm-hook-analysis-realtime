@@ -179,10 +179,63 @@ sudo systemctl reset-failed lha_realtime.service
 
 ## 8. 运行测试
 
+跑全部单元测试：
+
 ```bash
 cd /home/hx/try/lsm-hook-analysis-realtime
 python3 -m unittest discover -s tests -v
 ```
+
+### 8.1 覆盖率统计（白盒）
+
+先装测试依赖（只多一个 `coverage`，生产运行不需要）：
+
+```bash
+python3 -m pip install -r requirements-dev.txt
+```
+
+统计语句 + 分支覆盖率，并生成可点开逐行查看的 HTML 报告：
+
+```bash
+python3 -m coverage run -m unittest discover -s tests
+python3 -m coverage report      # 终端表格，带未覆盖行号
+python3 -m coverage html        # 输出到 reports/coverage/html/index.html
+```
+
+统计口径写在 `.coveragerc` 里（`branch = True`，只统计 `lha_realtime` 包），
+不需要在命令行重复指定参数。
+
+当前基线：**295 个用例，语句覆盖 100%，分支覆盖 100%**。
+
+### 8.2 测试文件分工
+
+| 文件 | 覆盖对象 |
+|---|---|
+| `test_realtime_pipeline.py` | 端到端链路、乱序到达、重复 round、敏感分类回归 |
+| `test_analyzer_parsing.py` | 输入加载、IR 解析、内核事件归并、网络端点回溯 |
+| `test_analyzer_report.py` | `analysis_report.md` 的全部渲染分支 |
+| `test_analyzer_push.py` | 上报 HTTP 链路的各种失败模式、mock round 识别 |
+| `test_rules_loading.py` | `detection_rules.yaml` 加载容错、glob 编译 |
+| `test_state_store.py` | SQLite schema 迁移、round/job 状态机流转 |
+| `test_pipeline_internals.py` | 目录清理越界保护、消息分派早退、worker 生命周期 |
+| `test_receiver.py` | Socket.IO 回调分派、进程启动与清理路径 |
+| `test_config.py` | 环境变量解析与运行时目录准备 |
+| `test_logging_utils.py` | 日志 handler 的重建与句柄释放 |
+
+### 8.3 用例清单
+
+全部 295 个用例逐条列在 `tests/TEST_CASES.md`，按测试文件 → 测试类 → 用例编号组织，
+每条带验证点说明。该文件由测试源码解析生成，不手工维护；改动测试后重新生成：
+
+```bash
+cd /home/hx/try/lsm-hook-analysis-realtime
+python3 scripts/gen_testcases.py
+```
+
+生成结果与 `unittest` 实际收集到的用例逐名对齐，可用于验收对照。
+
+测试不会碰生产数据：所有用例都在临时目录里建库和落盘，`receiver` 的用例在
+import 前就把 `StateStore` / `RealtimePipeline` 换成替身，也不会发起真实连接。
 
 ## 9. 项目结构
 
@@ -191,16 +244,31 @@ lsm-hook-analysis-realtime/
 ├── lha_realtime/
 │   ├── analyzer.py        # round 分析、报告生成、报告上报
 │   ├── config.py          # 环境变量和默认路径配置
+│   ├── detection_rules.yaml # 敏感资源分组与判定依据（改这里无需改代码）
 │   ├── logging_utils.py   # 共享日志配置
 │   ├── pipeline.py        # inbox 消费、落盘、分析 worker、重复 round 处理
 │   ├── receiver.py        # Socket.IO 接收端
+│   ├── rules.py           # 加载 detection_rules.yaml，编译敏感规则
 │   └── state.py           # SQLite inbox、round state、analysis jobs
 ├── scripts/
+│   ├── gen_testcases.py            # 生成 tests/TEST_CASES.md
 │   ├── redeploy_ignore_mock.sh
 │   └── redeploy_push_mock.sh
 ├── tests/
-│   └── test_realtime_pipeline.py
+│   ├── TEST_CASES.md               # 全部用例清单（自动生成）
+│   ├── test_realtime_pipeline.py   # 端到端链路与回归
+│   ├── test_analyzer_parsing.py    # 解析与内核事件归并
+│   ├── test_analyzer_report.py     # 报告渲染分支
+│   ├── test_analyzer_push.py       # 上报链路失败模式
+│   ├── test_rules_loading.py       # 规则加载与 glob 编译
+│   ├── test_state_store.py         # SQLite 状态机
+│   ├── test_pipeline_internals.py  # 落盘工具与 worker
+│   ├── test_receiver.py            # Socket.IO 接收端
+│   ├── test_config.py              # 环境变量解析
+│   └── test_logging_utils.py       # 日志 handler 重建
 ├── receiver.py            # 兼容启动入口
+├── .coveragerc            # 覆盖率统计口径
 ├── requirements.txt
+├── requirements-dev.txt   # 测试依赖（coverage）
 └── README.md
 ```

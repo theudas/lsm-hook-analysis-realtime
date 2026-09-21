@@ -21,9 +21,10 @@ from .rules import (
     IGNORED_NETWORK_ENDPOINTS,
     OPENCLAW_RUNTIME_BASENAMES,
     OPENCLAW_RUNTIME_PREFIXES,
+    PROC_SELF_IS_RUNTIME,
     RUNTIME_PREFIXES,
-    SENSITIVE_GLOBS,
-    SENSITIVE_PREFIXES,
+    SENSITIVE_RULES,
+    glob_to_regex,
     is_ignored_endpoint,
 )
 
@@ -282,6 +283,7 @@ def extract_kernel_file_ops(lsm: list, syscalls: list) -> list:
                 "tid": hook.get("tid"),
                 "timestamp_mono_ns": open_ts,
                 "path": hook.get("path"),
+                "syscall_pathname": (hook.get("args") or {}).get("syscall_pathname"),
                 "fd": hook.get("fd"),
                 "category": hook.get("category"),
                 "resource_role": hook.get("resource_role"),
@@ -426,54 +428,6 @@ def is_regex_pattern(identifier: str) -> bool:
     return any(hint in identifier for hint in REGEX_HINTS)
 
 
-def glob_to_regex(pattern: str) -> str:
-    """Translate IR file globs so * stays within one path segment and ** spans dirs."""
-    out = ["^"]
-    index = 0
-    while index < len(pattern):
-        char = pattern[index]
-        if char == "*":
-            if index + 1 < len(pattern) and pattern[index + 1] == "*":
-                index += 2
-                if index < len(pattern) and pattern[index] == "/":
-                    out.append("(?:.*/)?")
-                    index += 1
-                else:
-                    out.append(".*")
-                continue
-            out.append("[^/]*")
-            index += 1
-            continue
-        if char == "?":
-            out.append("[^/]")
-            index += 1
-            continue
-        if char == "[":
-            end = index + 1
-            if end < len(pattern) and pattern[end] in ("!", "^"):
-                end += 1
-            if end < len(pattern) and pattern[end] == "]":
-                end += 1
-            while end < len(pattern) and pattern[end] != "]":
-                end += 1
-            if end >= len(pattern):
-                out.append(re.escape(char))
-                index += 1
-                continue
-            content = pattern[index + 1 : end]
-            if content.startswith("!"):
-                content = "^" + content[1:]
-            elif content.startswith("^"):
-                content = "\\" + content
-            out.append("[" + content.replace("\\", "\\\\") + "]")
-            index = end + 1
-            continue
-        out.append(re.escape(char))
-        index += 1
-    out.append("$")
-    return "".join(out)
-
-
 def matches_file_identifier(path: str | None, identifier: str | None) -> bool:
     if path is None or not identifier:
         if not identifier:
@@ -501,8 +455,8 @@ def is_allowed(path: str | None, allowed_files: set) -> bool:
     return False
 
 
-# 敏感文件、运行时加载文件、openclaw 运行时文件/文档的定义均在 detection_rules.yaml 中配置，
-# 由 lha_realtime.rules 加载为 SENSITIVE_PREFIXES / RUNTIME_PREFIXES /
+# 敏感资源分组、运行时加载文件、openclaw 运行时文件/文档的定义均在 detection_rules.yaml 中配置，
+# 由 lha_realtime.rules 加载为 SENSITIVE_RULES / RUNTIME_PREFIXES /
 # OPENCLAW_RUNTIME_PREFIXES / OPENCLAW_RUNTIME_BASENAMES。
 
 
@@ -515,22 +469,55 @@ def is_openclaw_runtime(path: str) -> bool:
     return False
 
 
-# 预编译敏感通配（glob）为正则：用于命中 /proc/<pid>/environ 这类“同目录下仅部分子项敏感”
-# 的场景，避免用宽泛前缀（如 /proc/）把运行时高频访问的普通项一并误报为敏感越权。
-_SENSITIVE_GLOB_REGEXES = tuple(re.compile(glob_to_regex(g)) for g in SENSITIVE_GLOBS)
+_PROC_PID_RE = re.compile(r"^/proc/(\d+)(/|$)")
 
 
-def is_sensitive_glob(path: str) -> bool:
-    return any(pattern.fullmatch(path) for pattern in _SENSITIVE_GLOB_REGEXES)
+def is_proc_self_access(path: str, op: dict | None) -> bool:
+    """路径是进程在读自己的 /proc/<pid>/*（等价于 /proc/self/*）。
+
+    进程读自己的环境变量、内存映射、fd 表不跨越任何权限边界，是 glibc / Node /
+    shell 的常规行为；跨进程读取才是 ATT&CK T1003.007 描述的凭据窃取。
+    回放 454 个 round 时，全部 28 次 /proc/*/environ 与 /proc/*/maps 命中都属于本类。
+    """
+    if not PROC_SELF_IS_RUNTIME or not op:
+        return False
+    matched = _PROC_PID_RE.match(path)
+    if not matched:
+        return False
+    if str(op.get("pid")) == matched.group(1):
+        return True
+    syscall_path = op.get("syscall_pathname")
+    return isinstance(syscall_path, str) and syscall_path.startswith("/proc/self/")
 
 
-def classify(path: str | None) -> str:
+def matching_sensitive_rule(path: str | None, op: dict | None = None):
+    """返回命中的敏感分组（SensitiveRule），未命中返回 None。
+
+    判定顺序与 detection_rules.yaml 文档一致：
+      override_runtime 组 → openclaw 运行时 → 其余敏感组。
+    write_only 组还要求本次实际观测到写/创建/删除动作。
+    """
+    if path is None:
+        return None
+    actions = op.get("observed_actions") if op else None
+    if is_proc_self_access(path, op):
+        return None
+    openclaw_runtime = is_openclaw_runtime(path)
+    for rule in SENSITIVE_RULES:
+        if openclaw_runtime and not rule.override_runtime:
+            continue
+        if rule.matches_path(path) and rule.matches_actions(actions):
+            return rule
+    return None
+
+
+def classify(path: str | None, op: dict | None = None) -> str:
     if path is None:
         return "unknown"
+    if matching_sensitive_rule(path, op) is not None:
+        return "sensitive"
     if is_openclaw_runtime(path):
         return "runtime"
-    if path.startswith(SENSITIVE_PREFIXES) or is_sensitive_glob(path):
-        return "sensitive"
     if path.startswith(RUNTIME_PREFIXES):
         return "runtime"
     return "other"
@@ -551,11 +538,35 @@ def detect_anomalies(violations: list, kernel_ops: list, allowed: dict, net_obse
     """依据两条规则给出明确判定：敏感文件越权、IR action 与实际行为不一致。"""
     types = []
 
-    sensitive_paths = sorted(
-        {v["path"] for v in violations if v.get("category") == "sensitive" and v.get("path")}
-    )
-    if sensitive_paths:
-        types.append({"type": "访问危险文件（敏感越权）", "paths": sensitive_paths})
+    sensitive_hits: dict = {}
+    for violation in violations:
+        if violation.get("category") != "sensitive" or not violation.get("path"):
+            continue
+        sensitive_hits.setdefault(
+            violation["path"],
+            {
+                "path": violation["path"],
+                "rule": violation.get("sensitive_rule"),
+                "title": violation.get("sensitive_title"),
+                "severity": violation.get("sensitive_severity"),
+                "attck": violation.get("sensitive_attck") or [],
+                "reason": violation.get("sensitive_reason"),
+                "basis": violation.get("sensitive_basis"),
+                "actions": set(),
+            },
+        )["actions"].update(violation.get("observed_actions") or [])
+    if sensitive_hits:
+        items = [
+            {**hit, "actions": sorted(hit["actions"])}
+            for hit in sorted(sensitive_hits.values(), key=lambda h: h["path"])
+        ]
+        types.append(
+            {
+                "type": "访问危险文件（敏感越权）",
+                "paths": [hit["path"] for hit in items],
+                "items": items,
+            }
+        )
 
     file_mismatches = []
     for op in kernel_ops:
@@ -629,7 +640,15 @@ def analyze_round(round_dir: Path) -> dict:
         if ir_violation or role_violation:
             violation = dict(op)
             violation["kernel_category"] = violation.pop("category", None)
-            violation["category"] = classify(op["path"])
+            sensitive_rule = matching_sensitive_rule(op["path"], op)
+            violation["category"] = classify(op["path"], op)
+            if sensitive_rule is not None:
+                violation["sensitive_rule"] = sensitive_rule.id
+                violation["sensitive_title"] = sensitive_rule.title
+                violation["sensitive_severity"] = sensitive_rule.severity
+                violation["sensitive_attck"] = list(sensitive_rule.attck)
+                violation["sensitive_reason"] = sensitive_rule.reason
+                violation["sensitive_basis"] = sensitive_rule.basis
             violation["by_ir_json"] = ir_violation
             violation["by_resource_role"] = role_violation
             violation["judges_agree"] = ir_violation == role_violation
@@ -709,8 +728,24 @@ def write_outputs(round_dir: Path, result: dict) -> tuple[Path, Path]:
         add("- 异常类型:")
         for item in result["anomaly_types"]:
             if item["type"] == "访问危险文件（敏感越权）":
-                paths = ", ".join(f"`{p}`" for p in item["paths"])
-                add(f"  - {item['type']}: {paths}")
+                add(f"  - {item['type']}:")
+                # 同一敏感分组内的路径共享判定理由与依据，按组聚合输出，避免逐条重复。
+                grouped: dict = {}
+                for hit in item.get("items") or []:
+                    key = hit.get("rule") or hit.get("title") or "-"
+                    grouped.setdefault(key, {"meta": hit, "paths": []})["paths"].append(hit)
+                for group in grouped.values():
+                    meta = group["meta"]
+                    attck = f"，ATT&CK {'/'.join(meta['attck'])}" if meta.get("attck") else ""
+                    severity = meta.get("severity") or "high"
+                    add(f"    - [{severity}] {meta.get('title') or '敏感资源'}{attck} — 命中 {len(group['paths'])} 个路径")
+                    for hit in group["paths"]:
+                        actions = f"（{', '.join(hit['actions'])}）" if hit.get("actions") else ""
+                        add(f"      - `{hit['path']}`{actions}")
+                    if meta.get("reason"):
+                        add(f"      判定理由: {meta['reason']}")
+                    if meta.get("basis"):
+                        add(f"      规则依据: {meta['basis']}")
             elif item["type"] == "文件访问出现未授权动作":
                 add(f"  - {item['type']}:")
                 for mismatch in item["items"]:
@@ -792,15 +827,28 @@ def write_outputs(round_dir: Path, result: dict) -> tuple[Path, Path]:
                 entry["count"] += 1
                 entry["read_bytes"] += violation.get("read_bytes", 0) or 0
                 entry["agree"].add(bool(violation["judges_agree"]))
+                if violation.get("sensitive_title"):
+                    attck = "/".join(violation.get("sensitive_attck") or [])
+                    entry["basis"] = (
+                        f"{violation['sensitive_title']}"
+                        f"（{violation.get('sensitive_severity') or 'high'}"
+                        f"{'，ATT&CK ' + attck if attck else ''}）"
+                    )
+            sensitive_table = category == "sensitive"
             add(f"#### {cat_title[category]}（{len(agg)} 个路径 / {len(items)} 次）\n")
-            add("| path | hook | 动作 | 次数 | 读取字节 | 判据一致 |")
-            add("|---|---|---|---|---|---|")
+            if sensitive_table:
+                add("| path | 敏感依据 | hook | 动作 | 次数 | 读取字节 | 判据一致 |")
+                add("|---|---|---|---|---|---|---|")
+            else:
+                add("| path | hook | 动作 | 次数 | 读取字节 | 判据一致 |")
+                add("|---|---|---|---|---|---|")
             for path in sorted(agg, key=lambda p: (-agg[p]["count"], p or "")):
                 entry = agg[path]
                 agree = {True: "yes", False: "no"}
                 agree_val = agree[next(iter(entry["agree"]))] if len(entry["agree"]) == 1 else "部分"
+                basis = f" {entry.get('basis', '-')} |" if sensitive_table else ""
                 add(
-                    f"| `{path}` | {', '.join(sorted(entry['hooks']))} | "
+                    f"| `{path}` |{basis} {', '.join(sorted(entry['hooks']))} | "
                     f"{', '.join(sorted(entry['actions']))} | {entry['count']} | "
                     f"{entry['read_bytes']} | {agree_val} |"
                 )

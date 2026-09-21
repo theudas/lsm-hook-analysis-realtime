@@ -10,3 +10,8 @@ input/
 *.db-wal
 .pytest_cache/
 reports/
+.coverage
+.coverage.*
+htmlcov/
+.DS_Store
+tests.zip
