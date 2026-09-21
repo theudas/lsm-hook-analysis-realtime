@@ -179,19 +179,28 @@ class DoneWatcher(threading.Thread):
         self.interval = interval
         self._stop = threading.Event()
         self.done_at: dict[str, float] = {}  # round_id -> monotonic finish time
+        self.failed: set[str] = set()
 
     def run(self) -> None:
         while not self._stop.is_set():
             with self.store._lock:
                 rows = self.store._conn.execute(
-                    "SELECT round_id FROM analysis_jobs WHERE status = 'done'"
+                    "SELECT round_id, status FROM analysis_jobs "
+                    "WHERE status IN ('done', 'failed')"
                 ).fetchall()
             now = time.monotonic()
             for row in rows:
                 rid = row["round_id"]
-                if rid not in self.done_at:
-                    self.done_at[rid] = now
+                if row["status"] == "done":
+                    if rid not in self.done_at:
+                        self.done_at[rid] = now
+                else:
+                    self.failed.add(rid)
             self._stop.wait(self.interval)
+
+    def settled(self) -> int:
+        """已收敛的 round 数：成功 + 确定失败。损坏输入必然失败，不能计入未完成。"""
+        return len(self.done_at) + len(self.failed - set(self.done_at))
 
     def stop(self) -> None:
         self._stop.set()
@@ -266,7 +275,7 @@ def run_load_test(args: argparse.Namespace) -> int:
     # Drain: wait until all jobs are done or timeout.
     deadline = time.monotonic() + args.drain_timeout
     while time.monotonic() < deadline:
-        if len(watcher.done_at) >= args.rounds:
+        if watcher.settled() >= args.rounds:
             break
         time.sleep(0.05)
     t_drain_done = time.monotonic()
@@ -287,17 +296,25 @@ def run_load_test(args: argparse.Namespace) -> int:
     # Backlog trend: compare queued in first third vs last third of send window.
     final_pending, final_queued = (backlog.samples[-1][1], backlog.samples[-1][2]) if backlog.samples else (0, 0)
 
-    drain_wall = t_drain_done - t_start
-    sustained = completed / drain_wall if drain_wall > 0 else float("nan")
+    failed = len(watcher.failed - set(watcher.done_at))
+    settled = completed + failed
+    # 真实收敛时刻取最后一个 round 完成的时间；否则 drain-timeout 的空转会把分母撑大，
+    # 把"跑完了但有 round 必然失败"误算成吞吐低下。
+    last_done = max(watcher.done_at.values(), default=t_send_done)
+    drain_wall = (last_done if settled >= args.rounds else t_drain_done) - t_start
+    sustained = settled / drain_wall if drain_wall > 0 else float("nan")
 
     print("\n==================== RESULT ====================")
     print(f"rounds offered      : {args.rounds}")
-    print(f"rounds completed    : {completed}"
-          + ("" if completed == args.rounds else f"  (DRAIN INCOMPLETE — capacity exceeded or timeout)"))
+    print(f"rounds completed    : {completed}")
+    if failed:
+        print(f"rounds failed       : {failed}  (分析失败，多为损坏输入；不计入未完成)")
+    if settled < args.rounds:
+        print(f"rounds unsettled    : {args.rounds - settled}  (DRAIN INCOMPLETE — 排队未消化完)")
     print(f"target enqueue rate : {args.rate:.1f} rounds/s")
     print(f"achieved enqueue    : {achieved_rate:.1f} rounds/s")
-    print(f"sustained throughput: {sustained:.1f} rounds/s  (completed / total wall {drain_wall:.2f}s)"
-          + ("" if completed == args.rounds else "  [仅供参考：未全部完成，wall 被 drain-timeout 拉长]"))
+    print(f"sustained throughput: {sustained:.1f} rounds/s  (settled / wall {drain_wall:.2f}s)"
+          + ("" if settled >= args.rounds else "  [仅供参考：未收敛，wall 被 drain-timeout 拉长]"))
     print(f"backlog peak        : pending_msgs={max_pending}  queued_jobs={max_queued}")
     print(f"backlog at end      : pending_msgs={final_pending}  queued_jobs={final_queued}")
     if latencies:
@@ -321,9 +338,9 @@ def run_load_test(args: argparse.Namespace) -> int:
     # than ~1s of offered load means a stage (ingest or analysis) can't keep up.
     backlog_budget = max(10, args.rate)
     healthy_backlog = max_pending <= backlog_budget and max_queued <= backlog_budget
-    if completed == args.rounds and healthy_backlog:
+    if settled >= args.rounds and healthy_backlog:
         verdict = "SUSTAINABLE at this rate"
-    elif completed == args.rounds:
+    elif settled >= args.rounds:
         bottleneck = "ingest (pending msgs)" if max_pending > max_queued else "analysis (queued jobs)"
         verdict = f"OVER CAPACITY — backlog built up, bottleneck = {bottleneck} (drained only because load stopped)"
     elif not_ready:
