@@ -218,6 +218,7 @@ Agent 调用工具时，用户态能拿到的只有工具自己交代的东西�
 ## 越权清单（内核 LSM 放行，但用户态不允许）
    ### 文件   按 敏感资源 / 其他 / 运行时加载 / 未知路径 四类分表
    ### 网络   按 数据收发 / 连接管理 / 其他 分组
+## 已折叠的系统基线行为   命中 system_baseline / 忽略端点的操作，每条规则一行汇总（无折叠时不出现）
 ## 内核 resource_facts
 ```
 
@@ -334,7 +335,24 @@ flags 缺失且没有任何 syscall 佐证时兜底为 `read`。
 | 文件访问出现未授权动作 | 路径命中了 IR 允许集，但实际动作超出该 identifier 声明的动作集合 |
 | 网络访问出现未授权动作 | 观测到的网络动作超出 IR 声明的 `network_actions` |
 
-网络这条有一个抑制规则：工具去平台拉线上配置走的是本地回环。当一个 round 里所有可识别端点都落在 `network.ignored_endpoints` 里，整轮网络视为正常。只要出现一个其他端点（比如 `8.152.192.7:15100`），抑制立即失效，全部网络动作照常判定。
+网络判定按端点逐条处理。两类端点不参与判定：`network.ignored_endpoints`（只有 `127.0.0.1:15100`、`localhost:15100`，工具去平台拉线上配置走的本地回环），以及 `system_baseline` 里声明的本机系统端点（nscd / sssd / systemd-userdb 的 Unix socket）。`::1:15100`、`8.152.192.7:15100` 等其他地址一律照常判定。
+
+- 能通过 `connect` 关联到端点的 send/recv：端点被排除就不计入，否则计入。
+- 无法关联端点的动作（LSM 层 `socket_sendmsg`/`recvmsg` 不带地址，`fd` 恒为 0）：本轮所有可识别端点都被排除时，视为发生在这些端点上，整轮网络按正常处理；只要出现一个未排除端点，或一个端点都识别不出来，就保守计入。
+
+### 5.5 系统基线折叠
+
+`detection_rules.yaml` 的 `system_baseline` 列出高频出现的系统自带行为。命中的操作不进越权清单和 `analysis_violations.jsonl`，只在报告末尾按规则折叠成一行汇总，便于审计"屏蔽了什么、屏蔽了多少"。每条规则的条件按 AND 组合，可用 `hooks`、`categories`、`families`、`endpoints`、`path_missing`、`actions`（观测动作必须全部属于该集合）、`prefixes`/`globs`。
+
+| 规则 | 屏蔽什么 | 不屏蔽什么 |
+|---|---|---|
+| `nss_unix_socket` | 连接 nscd / sssd / userdb 的 Unix socket | `/run/systemd/private` 等其他本机 socket |
+| `netlink_socket` | `AF_NETLINK` 套接字操作 | `AF_INET` / `AF_INET6` / `AF_UNIX` |
+| `dynamic_loader_open` | runtime 目录下共享库、ld.so.cache、locale 的 `file_open` | `bprm_check`（执行了什么程序）、库目录写入 |
+| `runtime_mprotect` | 落在 runtime 的 `file_mprotect` | `/tmp` 等非 runtime 位置的 mprotect |
+| `pathless_file_hook` | 内核没给路径的 `file_permission` / `file_mprotect` | 带路径的同类 hook |
+
+硬约束：敏感命中永远不会被折叠；规则文件缺失时基线为空（宁可多报）；没有任何条件的条目会被丢弃并告警。用 `scripts/hotspot_stats.py --serve` 打开豁免建议页面：它只看内核侧事实，列出尚未豁免的高频行为并给出建议与 YAML 片段，合入规则后点页面上的“刷新”即可复核。
 
 ---
 

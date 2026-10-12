@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>内核豁免建议</title>
+<style>
+:root {
+  color-scheme: light;
+  --surface-0: #f4f4f2;
+  --surface-1: #fcfcfb;
+  --surface-2: #efeeea;
+  --border: #e0dfd9;
+  --text-primary: #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted: #77766f;
+  --seq-lo: #fcfcfb;
+  --seq-hi: #104281;
+  --accent: #2a78d6;
+  /* 状态色固定不随主题变化，且总是配合图标与文字出现 */
+  --good: #0ca30c;
+  --warning: #fab219;
+  --critical: #d03b3b;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --surface-0: #111110;
+    --surface-1: #1a1a19;
+    --surface-2: #242422;
+    --border: #34332f;
+    --text-primary: #f0efec;
+    --text-secondary: #c3c2b7;
+    --text-muted: #8f8e86;
+    --seq-lo: #1a1a19;
+    --seq-hi: #86b6ef;
+    --accent: #3987e5;
+  }
+  :root:not([data-theme="light"]) td.cell { background: var(--bg-d, var(--surface-2)); color: var(--ink-d, var(--text-secondary)); }
+  :root:not([data-theme="light"]) td.cell.zero { background: var(--surface-2); }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --surface-0: #111110;
+  --surface-1: #1a1a19;
+  --surface-2: #242422;
+  --border: #34332f;
+  --text-primary: #f0efec;
+  --text-secondary: #c3c2b7;
+  --text-muted: #8f8e86;
+  --seq-lo: #1a1a19;
+  --seq-hi: #86b6ef;
+  --accent: #3987e5;
+}
+:root[data-theme="dark"] td.cell { background: var(--bg-d, var(--surface-2)); color: var(--ink-d, var(--text-secondary)); }
+:root[data-theme="dark"] td.cell.zero { background: var(--surface-2); }
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--surface-0);
+  color: var(--text-primary);
+  font: 14px/1.5 -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+}
+main { max-width: 1280px; margin: 0 auto; padding: 24px 16px 64px; }
+header { display: flex; flex-wrap: wrap; gap: 12px; justify-content: space-between; align-items: flex-start; }
+header h1 { font-size: 22px; margin: 0 0 4px; }
+.meta { color: var(--text-muted); font-size: 12px; overflow-wrap: anywhere; }
+.refresh { display: flex; align-items: center; gap: 10px; }
+.refresh button { font-size: 14px; padding: 6px 16px; background: var(--accent); color: #fff; border-color: transparent; }
+.refresh button:disabled { opacity: .55; cursor: default; }
+#refresh-status { color: var(--text-secondary); font-size: 12px; max-width: 360px; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin: 20px 0; }
+.tile { background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; }
+.tile .label { color: var(--text-secondary); font-size: 12px; }
+.tile .value { font-size: 24px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.tile .sub { color: var(--text-muted); font-size: 12px; }
+section { background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-top: 16px; }
+section h2 { font-size: 16px; margin: 0 0 2px; }
+section .desc { color: var(--text-secondary); font-size: 13px; margin: 0 0 12px; }
+.legend { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-muted); margin-bottom: 8px; }
+.legend .bar { width: 140px; height: 10px; border-radius: 4px; border: 1px solid var(--border);
+  background: linear-gradient(90deg, var(--seq-lo), var(--seq-hi)); }
+.scroll { overflow-x: auto; max-width: 100%; }
+table.hm { border-collapse: separate; border-spacing: 2px; font-size: 12px; }
+table.hm th { font-weight: 500; color: var(--text-secondary); text-align: left; }
+table.hm thead th { vertical-align: bottom; padding: 0 2px 4px; max-width: 110px; min-width: 64px;
+  overflow-wrap: anywhere; line-height: 1.3; }
+table.hm tbody th { position: sticky; left: 0; background: var(--surface-1); padding: 0 8px 0 0;
+  max-width: 380px; min-width: 180px; overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-weight: 400; color: var(--text-primary); }
+.tag { font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; display: inline-block; font-size: 11px;
+  color: var(--text-muted); border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; margin-left: 6px; }
+td.cell { min-width: 64px; height: 26px; border-radius: 4px; text-align: center; font-variant-numeric: tabular-nums;
+  background: var(--bg-l, var(--surface-2)); color: var(--ink-l, var(--text-secondary)); cursor: default; outline-offset: 1px; }
+td.cell.zero { background: var(--surface-2); }
+td.cell:hover, td.cell:focus { outline: 2px solid var(--accent); }
+td.total { color: var(--text-muted); padding-left: 8px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.verdict { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; font-size: 12px;
+  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; color: var(--text-primary); margin-left: 6px; }
+td > .verdict { margin-left: 0; font-size: 13px; font-weight: 500; }
+.verdict .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.verdict.accept .dot { background: var(--good); }
+.verdict.review .dot { background: var(--warning); }
+.verdict.reject .dot { background: var(--critical); }
+table.list { width: 100%; border-collapse: collapse; font-size: 13px; }
+table.list th, table.list td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+table.list th { color: var(--text-secondary); font-weight: 500; white-space: nowrap; }
+table.list td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+table.list tr.row-accept td:first-child { box-shadow: inset 3px 0 var(--good); }
+table.list tr.row-review td:first-child { box-shadow: inset 3px 0 var(--warning); }
+table.list tr.row-reject td:first-child { box-shadow: inset 3px 0 var(--critical); }
+table.list ul { margin: 0; padding-left: 18px; color: var(--text-secondary); }
+.kind { display: inline-block; font-size: 11px; color: var(--text-muted); border: 1px solid var(--border);
+  border-radius: 4px; padding: 0 4px; margin-right: 6px; }
+.sub, .examples { color: var(--text-muted); font-size: 12px; }
+code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+td code { overflow-wrap: anywhere; }
+pre { background: var(--surface-2); border-radius: 6px; padding: 8px; margin: 6px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+details { margin-top: 6px; }
+details summary { cursor: pointer; color: var(--accent); }
+button { font: inherit; font-size: 12px; color: var(--text-primary); background: var(--surface-2);
+  border: 1px solid var(--border); border-radius: 4px; padding: 2px 8px; cursor: pointer; }
+.empty { color: var(--text-muted); }
+.js-only { display: none !important; }
+html.js .js-only { display: inline-flex !important; }
+</style>
+</head>
+<body>
+<main>
+<!--__BODY__-->
+</main>
+<script>
+// 只做增强：没有脚本时页面照样完整显示。
+document.documentElement.classList.add("js");
+
+var refresh = document.getElementById("refresh");
+var statusEl = document.getElementById("refresh-status");
+if (location.protocol === "file:") {
+  refresh.disabled = true;
+  statusEl.textContent = "当前是静态文件，刷新需用 python3 scripts/hotspot_stats.py --serve 打开";
+} else {
+  refresh.addEventListener("click", function () {
+    refresh.disabled = true;
+    statusEl.textContent = "正在用最新规则和语料重新统计…";
+    fetch("refresh", { method: "POST" })
+      .then(function (resp) { return resp.json().catch(function () { return { ok: false, message: "HTTP " + resp.status }; }); })
+      .then(function (result) {
+        if (result.ok) { location.reload(); return; }
+        refresh.disabled = false;
+        statusEl.textContent = "刷新失败：" + (result.message || result.error || "未知错误");
+      })
+      .catch(function (err) {
+        refresh.disabled = false;
+        statusEl.textContent = "刷新失败：" + err;
+      });
+  });
+}
+
+document.querySelectorAll("button.copy").forEach(function (btn) {
+  btn.addEventListener("click", function () {
+    var text = btn.parentElement.querySelector("pre").textContent;
+    var done = function () { btn.textContent = "已复制"; };
+    var fail = function () { btn.textContent = "复制失败，请手动选择"; };
+    if (navigator.clipboard) navigator.clipboard.writeText(text).then(done, fail); else fail();
+  });
+});
+</script>
+</body>
+</html>

@@ -7,10 +7,16 @@
 敏感资源以 ``sensitive_groups`` 分组表达，每组带威胁语义（reason）、公开依据
 （basis / attck）与匹配动作（match）。加载后编译为 ``SENSITIVE_RULES``：一个有序
 的 :class:`SensitiveRule` 列表，供 analyzer 判定并在报告中给出判定理由。
+
+``system_baseline`` 描述高频出现的系统自带行为（NSS 查询、动态链接 mprotect 等），
+编译为 ``BASELINE_RULES``：命中的操作不进越权清单、不参与网络判定，只在报告末尾
+折叠汇总。基线永远不覆盖敏感命中。
 """
 
 from __future__ import annotations
 
+import functools
+import logging
 import os
 import re
 from dataclasses import dataclass, field
@@ -24,6 +30,8 @@ DEFAULT_RULES_PATH = PACKAGE_DIR / "detection_rules.yaml"
 
 # 触发 write_only 组的动作集合（与 analyzer 的动作词汇一致）。
 WRITE_ACTIONS = frozenset({"write", "create", "delete"})
+
+log = logging.getLogger("lha_realtime_rules")
 
 
 @dataclass(frozen=True)
@@ -58,6 +66,55 @@ class SensitiveRule:
         """报告中展示的判定理由，例如：SSH 与私钥材料（critical，ATT&CK T1552.004）。"""
         suffix = f"，ATT&CK {'/'.join(self.attck)}" if self.attck else ""
         return f"{self.title}（{self.severity}{suffix}）"
+
+
+def endpoint_token(endpoint: str | None) -> str | None:
+    """端点串可能带地址族前缀（如 ``AF_INET 127.0.0.1:15100``），取最后一个 token。"""
+    if not endpoint:
+        return None
+    parts = endpoint.split()
+    return parts[-1] if parts else None
+
+
+@dataclass(frozen=True)
+class BaselineRule:
+    """一类系统基线行为：声明的条件全部成立才算命中（AND），未声明的条件不限制。"""
+
+    id: str
+    title: str
+    reason: str
+    hooks: frozenset = frozenset()
+    categories: frozenset = frozenset()
+    families: frozenset = frozenset()
+    endpoints: frozenset = frozenset()
+    path_missing: bool = False
+    actions: frozenset = frozenset()
+    prefixes: tuple = ()
+    glob_regexes: tuple = field(default=(), repr=False)
+
+    def matches(self, op: dict, category: str | None) -> bool:
+        if self.hooks and op.get("hook_name") not in self.hooks:
+            return False
+        if self.prefixes or self.glob_regexes:
+            path = op.get("path")
+            if not isinstance(path, str):
+                return False
+            if not (path.startswith(self.prefixes) or any(p.fullmatch(path) for p in self.glob_regexes)):
+                return False
+        if self.categories and category not in self.categories:
+            return False
+        if self.actions:
+            # 观测到的动作必须全部落在声明集合内：只豁免读取时，写入/删除照常列出。
+            observed = set(op.get("observed_actions") or ())
+            if not observed or not observed <= self.actions:
+                return False
+        if self.path_missing and op.get("path") is not None:
+            return False
+        if self.families and op.get("net_family") not in self.families:
+            return False
+        if self.endpoints and endpoint_token(op.get("net_target")) not in self.endpoints:
+            return False
+        return True
 
 
 # 内置默认值：当 YAML 缺失或对应键为空时使用，保证服务在没有规则文件时仍可运行。
@@ -218,7 +275,6 @@ _DEFAULT_OPENCLAW_RUNTIME_BASENAMES = (
 )
 _DEFAULT_IGNORED_NETWORK_ENDPOINTS = (
     "127.0.0.1:15100",
-    "::1:15100",
     "localhost:15100",
 )
 
@@ -234,8 +290,12 @@ def _load_yaml(path: Path) -> dict:
     try:
         data = yaml.safe_load(path.read_text(encoding="utf-8"))
     except yaml.YAMLError:
+        log.error("检测规则 YAML 解析失败，回退内置默认规则 path=%s", path, exc_info=True)
         return {}
-    return data if isinstance(data, dict) else {}
+    if not isinstance(data, dict):
+        log.error("检测规则 YAML 顶层不是映射，回退内置默认规则 path=%s", path)
+        return {}
+    return data
 
 
 def _tuple(values, default: tuple) -> tuple:
@@ -249,6 +309,7 @@ def _tuple(values, default: tuple) -> tuple:
     return tuple(seen) if seen else default
 
 
+@functools.lru_cache(maxsize=4096)
 def glob_to_regex(pattern: str) -> str:
     """把路径 glob 编译成正则：``*`` 限单层路径段，``**`` 跨目录。
 
@@ -339,6 +400,38 @@ def _compile_groups(groups) -> tuple:
     return tuple(rule for _, _, rule in rules)
 
 
+def _compile_baseline(entries) -> tuple:
+    """把 YAML 的 system_baseline 编译成 BaselineRule 元组；没有任何条件的条目会匹配一切，直接丢弃。"""
+    if not isinstance(entries, list):
+        return ()
+    rules = []
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            continue
+        rule = BaselineRule(
+            id=str(entry.get("id") or f"baseline_{index}"),
+            title=str(entry.get("title") or entry.get("id") or "系统基线行为"),
+            reason=str(entry.get("reason") or ""),
+            hooks=frozenset(_tuple(entry.get("hooks"), ())),
+            categories=frozenset(_tuple(entry.get("categories"), ())),
+            families=frozenset(_tuple(entry.get("families"), ())),
+            endpoints=frozenset(_tuple(entry.get("endpoints"), ())),
+            path_missing=entry.get("path_missing") is True,
+            actions=frozenset(_tuple(entry.get("actions"), ())),
+            prefixes=_tuple(entry.get("prefixes"), ()),
+            glob_regexes=tuple(re.compile(glob_to_regex(g)) for g in _tuple(entry.get("globs"), ())),
+        )
+        conditions = (
+            rule.hooks, rule.categories, rule.families, rule.endpoints, rule.path_missing,
+            rule.actions, rule.prefixes, rule.glob_regexes,
+        )
+        if not any(conditions):
+            log.warning("忽略没有任何匹配条件的 system_baseline 条目 id=%s", rule.id)
+            continue
+        rules.append(rule)
+    return tuple(rules)
+
+
 _RULES = _load_yaml(_rules_path())
 _FILES = _RULES.get("files") if isinstance(_RULES.get("files"), dict) else {}
 _NETWORK = _RULES.get("network") if isinstance(_RULES.get("network"), dict) else {}
@@ -362,6 +455,10 @@ IGNORED_NETWORK_ENDPOINTS = _tuple(
     _NETWORK.get("ignored_endpoints"), _DEFAULT_IGNORED_NETWORK_ENDPOINTS
 )
 
+# 基线没有内置默认值：规则文件缺失时宁可多报，也不悄悄屏蔽任何行为。
+BASELINE_RULES = _compile_baseline(_RULES.get("system_baseline"))
+BASELINE_ENDPOINTS = frozenset(e for rule in BASELINE_RULES for e in rule.endpoints)
+
 
 def is_ignored_endpoint(endpoint: str | None) -> bool:
     """端点是否属于忽略集合（工具拉取线上配置的本地回环连接）。
@@ -369,7 +466,21 @@ def is_ignored_endpoint(endpoint: str | None) -> bool:
     端点串可能带地址族前缀（如 ``AF_INET 127.0.0.1:15100``）或仅为 ``ip:port``；
     这里取最后一个空白分隔 token 作为 ``ip:port`` 进行完整匹配（端口必须一致）。
     """
-    if not endpoint:
-        return False
-    token = endpoint.split()[-1] if endpoint.split() else endpoint
-    return token in IGNORED_NETWORK_ENDPOINTS
+    token = endpoint_token(endpoint)
+    return token is not None and token in IGNORED_NETWORK_ENDPOINTS
+
+
+def is_baseline_endpoint(endpoint: str | None) -> bool:
+    """端点是否属于 system_baseline 声明的本机系统端点（如 nscd 的 Unix socket）。"""
+    token = endpoint_token(endpoint)
+    return token is not None and token in BASELINE_ENDPOINTS
+
+
+def matching_baseline_rule(op: dict, category: str | None):
+    """返回命中的系统基线规则；敏感命中永远不被基线屏蔽。"""
+    if category == "sensitive":
+        return None
+    for rule in BASELINE_RULES:
+        if rule.matches(op, category):
+            return rule
+    return None

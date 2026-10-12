@@ -14,6 +14,8 @@ FILE_META = {
     "test_analyzer_report.py": ("lha_realtime/analyzer.py（渲染层）", "analysis_report.md 的全部渲染分支"),
     "test_analyzer_push.py": ("lha_realtime/analyzer.py（上报层）", "上报 HTTP 链路失败模式、mock round 识别"),
     "test_rules_loading.py": ("lha_realtime/rules.py", "detection_rules.yaml 加载容错、glob 编译"),
+    "test_system_baseline.py": ("lha_realtime/rules.py + analyzer.py", "system_baseline 折叠边界、按端点的网络判定"),
+    "test_hotspot_stats.py": ("scripts/hotspot_stats.py", "豁免建议的判定边界、生成 YAML 的折叠效果"),
     "test_state_store.py": ("lha_realtime/state.py", "SQLite schema 迁移、round/job 状态机"),
     "test_pipeline_internals.py": ("lha_realtime/pipeline.py", "落盘工具、消息分派、任务取代、worker 生命周期"),
     "test_receiver.py": ("lha_realtime/receiver.py", "Socket.IO 回调分派、进程启动与清理"),
@@ -27,6 +29,8 @@ ORDER = [
     "test_analyzer_report.py",
     "test_analyzer_push.py",
     "test_rules_loading.py",
+    "test_system_baseline.py",
+    "test_hotspot_stats.py",
     "test_state_store.py",
     "test_pipeline_internals.py",
     "test_receiver.py",
@@ -137,10 +141,9 @@ def main():
 
     w("## 如何重新生成")
     w("")
-    w("用例清单随测试代码演进，改动测试后重新生成即可：")
+    w("用例清单随测试代码演进，改动测试后在项目根目录重新生成即可：")
     w("")
     w("```bash")
-    w("cd /home/hx/try/lsm-hook-analysis-realtime")
     w("python3 scripts/gen_testcases.py")
     w("```")
     w("")
@@ -148,14 +151,14 @@ def main():
     w("")
     w("| 模块 | 语句 | 分支 | 覆盖率 |")
     w("|---|---|---|---|")
-    w("| `analyzer.py` | 578 | 274 | 100% |")
+    w("| `analyzer.py` | 624 | 288 | 100% |")
     w("| `pipeline.py` | 205 | 74 | 100% |")
     w("| `state.py` | 150 | 30 | 100% |")
-    w("| `rules.py` | 131 | 48 | 100% |")
+    w("| `rules.py` | 203 | 84 | 100% |")
     w("| `receiver.py` | 55 | 16 | 100% |")
     w("| `config.py` | 42 | 4 | 100% |")
     w("| `logging_utils.py` | 20 | 4 | 100% |")
-    w("| **合计** | **1181** | **450** | **100%** |")
+    w("| **合计** | **1299** | **500** | **100%** |")
     w("")
     w("统计口径见 `.coveragerc`（`branch = True`，只统计 `lha_realtime` 包）。")
     w("生成覆盖率报告：`python3 -m coverage run -m unittest discover -s tests && python3 -m coverage html`")

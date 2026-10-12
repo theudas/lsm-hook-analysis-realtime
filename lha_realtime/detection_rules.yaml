@@ -76,17 +76,72 @@
 # ============================================================================
 
 meta:
-  version: 2
-  updated: "2026-07-29"
+  version: 3
+  updated: "2026-10-12"
 
 network:
   # 忽略这些网络端点的检测：命中即视为正常（工具去平台获取线上配置走的是本地回环）。
-  # 需要完整匹配 IP 与端口（端口不同则仍按正常逻辑判定）。localhost 会解析为 127.0.0.1 / ::1。
-  # 恶意网络调用会连接其他地址（如 8.152.192.7），不在此列，保持正常判定。
+  # 按字面完整匹配 IP 与端口（端口不同则仍按正常逻辑判定），不做域名解析。
+  # 只忽略这两项：::1:15100、8.152.192.7:15100 等其他任何地址都照常判定。
   ignored_endpoints:
     - "127.0.0.1:15100"
-    - "::1:15100"
     - "localhost:15100"
+
+# ============================================================================
+# 系统基线行为：高频出现的系统自带行为，命中即折叠到报告末尾汇总。
+# ============================================================================
+# - 折叠的操作不进越权清单与 analysis_violations.jsonl；endpoints 声明的端点
+#   还会像 ignored_endpoints 一样从网络判定中剔除。
+# - 每条声明的条件全部成立才算命中（AND）；可用条件：hooks、categories
+#   （sensitive/runtime/other/unknown）、families（地址族）、endpoints（端点，
+#   Unix socket 写 sun_path）、path_missing（内核未给出路径）、actions（观测到的
+#   动作必须全部属于该集合，如 ["read"] 只豁免读取）、prefixes / globs（路径，
+#   语义同 sensitive_groups）。
+# - 敏感命中永远不会被基线屏蔽，基线不能用来降低检测力。
+# - 条目来源：本地 274 个 round 回放的高频项（scripts/hotspot_stats.py 可复现）。
+# ============================================================================
+system_baseline:
+
+  - id: nss_unix_socket
+    title: "NSS 名字解析 Unix socket"
+    reason: "glibc 解析用户名/组名时经 nscd、sssd、systemd-userdb 的本机 Unix socket 查询，ls -l、tar、id 等命令每次都会触发；不出本机，不构成网络访问"
+    endpoints:
+      - "/var/run/nscd/socket"
+      - "/run/nscd/socket"                 # /var/run 是 /run 的符号链接，内核可能报告任一路径
+      - "/var/lib/sss/pipes/nss"
+      - "/run/systemd/userdb/io.systemd.DynamicUser"
+
+  - id: netlink_socket
+    title: "Netlink 套接字"
+    reason: "getaddrinfo / getifaddrs 通过 AF_NETLINK 向内核查询网卡与路由，是名字解析的常规前置步骤，不连接任何主机（回放中出现在 82 个 round）"
+    families: ["AF_NETLINK"]
+
+  - id: dynamic_loader_open
+    title: "动态链接库与 locale 加载"
+    reason: "每次 exec 都由 ld.so 打开 ld.so.cache、libc 等共享库与 locale/gconv 数据（回放中 libc.so.6 单个文件 1040 次），只读加载；bprm_check（执行了什么程序）不在此列，仍照常列出"
+    hooks: ["file_open"]
+    categories: ["runtime"]
+    prefixes:
+      - "/usr/lib64/"
+      - "/lib64/"
+      - "/usr/lib/"                        # 带尾斜杠：只匹配目录内文件，避免连带同名开头的路径
+      - "/lib/"
+      - "/usr/local/lib/"
+      - "/usr/local/lib64/"
+      - "/etc/ld.so.cache"
+      - "/usr/share/locale/"
+
+  - id: runtime_mprotect
+    title: "运行时库内存保护变更"
+    reason: "动态链接器加载 .so 时对代码段做 mprotect，是每次 exec 的固定动作（回放中 4483 次全部落在 runtime）；仅屏蔽 runtime 目标，/tmp 等处的可疑库仍照常列出"
+    hooks: ["file_mprotect"]
+    categories: ["runtime"]
+
+  - id: pathless_file_hook
+    title: "无路径的文件权限检查"
+    reason: "file_permission / file_mprotect 在读写已打开的 fd 或匿名映射时触发，内核未给出路径，无法关联到任何资源（回放中 2757 次）"
+    hooks: ["file_permission", "file_mprotect"]
+    path_missing: true
 
 files:
   # --------------------------------------------------------------------------
