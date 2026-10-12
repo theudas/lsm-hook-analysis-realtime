@@ -18,13 +18,15 @@ from urllib import error, request
 from .config import SETTINGS
 from .logging_utils import setup_logging
 from .rules import (
-    IGNORED_NETWORK_ENDPOINTS,
     OPENCLAW_RUNTIME_BASENAMES,
     OPENCLAW_RUNTIME_PREFIXES,
+    PROC_SELF_IS_RUNTIME,
     RUNTIME_PREFIXES,
-    SENSITIVE_GLOBS,
-    SENSITIVE_PREFIXES,
+    SENSITIVE_RULES,
+    glob_to_regex,
+    is_baseline_endpoint,
     is_ignored_endpoint,
+    matching_baseline_rule,
 )
 
 
@@ -194,10 +196,10 @@ def net_group(hook_name: str | None) -> str:
     return "其他"
 
 
-def network_detail(hook: dict) -> str:
-    """从网络 hook 提取简明目标信息：地址族 + 远端地址（若有）。"""
+def network_target(hook: dict) -> tuple:
+    """从网络 hook 提取 (地址族, 远端地址)，缺失的一项为 None。"""
     if not is_network_hook(hook.get("hook_name")):
-        return ""
+        return None, None
     args = hook.get("args", {}) or {}
     family = args.get("family") or args.get("sa_family")
     remote = args.get("remote_addr") if isinstance(args.get("remote_addr"), dict) else {}
@@ -210,8 +212,12 @@ def network_detail(hook: dict) -> str:
         ip = remote.get("sin6_addr") or args.get("sin6_addr")
         port = remote.get("sin6_port") or args.get("sin6_port")
         target = f"{ip}:{port}" if port is not None else ip
-    parts = [p for p in (family, target) if p]
-    return " ".join(str(p) for p in parts)
+    return family or None, str(target) if target else None
+
+
+def network_detail(hook: dict) -> str:
+    """从网络 hook 提取简明目标信息：地址族 + 远端地址（若有）。"""
+    return " ".join(str(p) for p in network_target(hook) if p)
 
 
 def extract_kernel_file_ops(lsm: list, syscalls: list) -> list:
@@ -243,6 +249,7 @@ def extract_kernel_file_ops(lsm: list, syscalls: list) -> list:
 
     ops = []
     for hook in lsm:
+        net_family, net_target = network_target(hook)
         related = sys_by_id.get(hook.get("related_event_id"))
         open_fd = related.get("return_value") if related and related.get("action") == "open" else None
         open_ts = hook["timestamp_mono_ns"]
@@ -282,6 +289,7 @@ def extract_kernel_file_ops(lsm: list, syscalls: list) -> list:
                 "tid": hook.get("tid"),
                 "timestamp_mono_ns": open_ts,
                 "path": hook.get("path"),
+                "syscall_pathname": (hook.get("args") or {}).get("syscall_pathname"),
                 "fd": hook.get("fd"),
                 "category": hook.get("category"),
                 "resource_role": hook.get("resource_role"),
@@ -299,6 +307,8 @@ def extract_kernel_file_ops(lsm: list, syscalls: list) -> list:
                 "observed_actions": sorted(observed_actions),
                 "is_network": is_network_hook(hook["hook_name"]),
                 "net_detail": network_detail(hook),
+                "net_family": net_family,
+                "net_target": net_target,
             }
         )
     ops.sort(key=lambda row: row["timestamp_mono_ns"])
@@ -345,17 +355,25 @@ def connect_endpoints(syscalls: list) -> dict:
     return conns
 
 
+def is_excluded_endpoint(endpoint: str | None) -> bool:
+    """端点不参与网络判定：配置的忽略端点，或 system_baseline 声明的本机系统端点。"""
+    return is_ignored_endpoint(endpoint) or is_baseline_endpoint(endpoint)
+
+
 def parse_network_activity(lsm: list, syscalls: list) -> dict:
-    """汇总该 round 的 send / receive 网络行为，并按忽略端点做整轮判定。
+    """汇总该 round 的 send / receive 网络行为，并按端点逐条决定是否计入判定。
 
     只要出现 send/receive 系统调用或对应 LSM hook 就计入，不论目标是外部主机、
     本地 IPC 还是监控端口；并 best-effort 关联目标端点用于报告展示。
 
-    针对 detection_rules.yaml 中配置的忽略端点（如工具去平台拉取线上配置的
-    127.0.0.1:15100 / ::1:15100 / localhost:15100，端口需完整匹配）：若本轮所有
-    可识别端点都落在忽略集合内，则整轮网络行为按正常处理（effective actions 置空、
-    展示端点仅保留未忽略者）；只要出现其他端点（如恶意的 8.152.192.7），或无法识别
-    任何端点，则保持原有判定逻辑。
+    两类端点不参与判定：detection_rules.yaml 的 network.ignored_endpoints（工具
+    去平台拉取线上配置的 127.0.0.1:15100 / localhost:15100，端口需完整匹配），
+    以及 system_baseline 声明的本机系统端点（nscd / sssd 的 Unix socket 等）。
+
+    - 能关联到端点的动作：端点被排除则不计入，否则计入。
+    - 无法关联端点的动作（LSM 层 sendmsg/recvmsg 不带地址）：若本轮所有可识别端点
+      都被排除，则视为发生在这些端点上、整轮按正常处理；只要出现其他端点（如
+      8.152.192.7:15100），或无法识别任何端点，则照常计入。
     """
     conns = connect_endpoints(syscalls)
 
@@ -372,7 +390,18 @@ def parse_network_activity(lsm: list, syscalls: list) -> dict:
         return chosen if chosen is not None else records[0][1]
 
     observed_actions = set()
+    attributed_actions = set()
+    unattributed_actions = set()
     all_endpoints = set()
+
+    def record(actions: set, endpoint: str | None) -> None:
+        observed_actions.update(actions)
+        if not endpoint:
+            unattributed_actions.update(actions)
+            return
+        all_endpoints.add(endpoint)
+        if not is_excluded_endpoint(endpoint):
+            attributed_actions.update(actions)
 
     # connect 的目标本身也纳入端点集合，即使之后没有 send/recv（例如恶意 connect 探测）。
     for records in conns.values():
@@ -382,30 +411,25 @@ def parse_network_activity(lsm: list, syscalls: list) -> dict:
 
     for hook in lsm:
         hook_actions = network_hook_actions(hook.get("hook_name"))
-        if not hook_actions:
-            continue
-        observed_actions.update(hook_actions)
-        detail = network_detail(hook)
-        if detail:
-            all_endpoints.add(detail)
+        if hook_actions:
+            record(hook_actions, network_detail(hook) or None)
 
     for syscall in syscalls:
         action = syscall.get("action")
         if action in NETWORK_SEND_ACTIONS:
-            observed_actions.add("send")
+            actions = {"send"}
         elif action in NETWORK_RECV_ACTIONS:
-            observed_actions.add("receive")
+            actions = {"receive"}
         else:
             continue
-        endpoint = lookup(syscall.get("pid"), syscall.get("fd"), syscall.get("timestamp_mono_ns", 0))
-        if endpoint:
-            all_endpoints.add(endpoint)
+        record(actions, lookup(syscall.get("pid"), syscall.get("fd"), syscall.get("timestamp_mono_ns", 0)))
 
     ignored_endpoints = {e for e in all_endpoints if is_ignored_endpoint(e)}
-    remaining_endpoints = all_endpoints - ignored_endpoints
-    # 存在可识别端点且全部属于忽略集合 → 整轮网络视为正常（工具拉取线上配置）。
+    baseline_endpoints = {e for e in all_endpoints - ignored_endpoints if is_baseline_endpoint(e)}
+    remaining_endpoints = all_endpoints - ignored_endpoints - baseline_endpoints
+    # 存在可识别端点且全部被排除 → 整轮网络视为正常。
     suppressed = bool(all_endpoints) and not remaining_endpoints
-    effective_actions = set() if suppressed else observed_actions
+    effective_actions = set() if suppressed else attributed_actions | unattributed_actions
 
     return {
         "actions": effective_actions,
@@ -413,6 +437,7 @@ def parse_network_activity(lsm: list, syscalls: list) -> dict:
         "observed_actions": observed_actions,
         "all_endpoints": all_endpoints,
         "ignored_endpoints": ignored_endpoints,
+        "baseline_endpoints": baseline_endpoints,
         "suppressed": suppressed,
     }
 
@@ -424,54 +449,6 @@ GLOB_HINTS = ("*", "?", "[")
 def is_regex_pattern(identifier: str) -> bool:
     """Best-effort inference because IR identifiers do not carry pattern type."""
     return any(hint in identifier for hint in REGEX_HINTS)
-
-
-def glob_to_regex(pattern: str) -> str:
-    """Translate IR file globs so * stays within one path segment and ** spans dirs."""
-    out = ["^"]
-    index = 0
-    while index < len(pattern):
-        char = pattern[index]
-        if char == "*":
-            if index + 1 < len(pattern) and pattern[index + 1] == "*":
-                index += 2
-                if index < len(pattern) and pattern[index] == "/":
-                    out.append("(?:.*/)?")
-                    index += 1
-                else:
-                    out.append(".*")
-                continue
-            out.append("[^/]*")
-            index += 1
-            continue
-        if char == "?":
-            out.append("[^/]")
-            index += 1
-            continue
-        if char == "[":
-            end = index + 1
-            if end < len(pattern) and pattern[end] in ("!", "^"):
-                end += 1
-            if end < len(pattern) and pattern[end] == "]":
-                end += 1
-            while end < len(pattern) and pattern[end] != "]":
-                end += 1
-            if end >= len(pattern):
-                out.append(re.escape(char))
-                index += 1
-                continue
-            content = pattern[index + 1 : end]
-            if content.startswith("!"):
-                content = "^" + content[1:]
-            elif content.startswith("^"):
-                content = "\\" + content
-            out.append("[" + content.replace("\\", "\\\\") + "]")
-            index = end + 1
-            continue
-        out.append(re.escape(char))
-        index += 1
-    out.append("$")
-    return "".join(out)
 
 
 def matches_file_identifier(path: str | None, identifier: str | None) -> bool:
@@ -501,8 +478,8 @@ def is_allowed(path: str | None, allowed_files: set) -> bool:
     return False
 
 
-# 敏感文件、运行时加载文件、openclaw 运行时文件/文档的定义均在 detection_rules.yaml 中配置，
-# 由 lha_realtime.rules 加载为 SENSITIVE_PREFIXES / RUNTIME_PREFIXES /
+# 敏感资源分组、运行时加载文件、openclaw 运行时文件/文档的定义均在 detection_rules.yaml 中配置，
+# 由 lha_realtime.rules 加载为 SENSITIVE_RULES / RUNTIME_PREFIXES /
 # OPENCLAW_RUNTIME_PREFIXES / OPENCLAW_RUNTIME_BASENAMES。
 
 
@@ -515,22 +492,55 @@ def is_openclaw_runtime(path: str) -> bool:
     return False
 
 
-# 预编译敏感通配（glob）为正则：用于命中 /proc/<pid>/environ 这类“同目录下仅部分子项敏感”
-# 的场景，避免用宽泛前缀（如 /proc/）把运行时高频访问的普通项一并误报为敏感越权。
-_SENSITIVE_GLOB_REGEXES = tuple(re.compile(glob_to_regex(g)) for g in SENSITIVE_GLOBS)
+_PROC_PID_RE = re.compile(r"^/proc/(\d+)(/|$)")
 
 
-def is_sensitive_glob(path: str) -> bool:
-    return any(pattern.fullmatch(path) for pattern in _SENSITIVE_GLOB_REGEXES)
+def is_proc_self_access(path: str, op: dict | None) -> bool:
+    """路径是进程在读自己的 /proc/<pid>/*（等价于 /proc/self/*）。
+
+    进程读自己的环境变量、内存映射、fd 表不跨越任何权限边界，是 glibc / Node /
+    shell 的常规行为；跨进程读取才是 ATT&CK T1003.007 描述的凭据窃取。
+    回放 454 个 round 时，全部 28 次 /proc/*/environ 与 /proc/*/maps 命中都属于本类。
+    """
+    if not PROC_SELF_IS_RUNTIME or not op:
+        return False
+    matched = _PROC_PID_RE.match(path)
+    if not matched:
+        return False
+    if str(op.get("pid")) == matched.group(1):
+        return True
+    syscall_path = op.get("syscall_pathname")
+    return isinstance(syscall_path, str) and syscall_path.startswith("/proc/self/")
 
 
-def classify(path: str | None) -> str:
+def matching_sensitive_rule(path: str | None, op: dict | None = None):
+    """返回命中的敏感分组（SensitiveRule），未命中返回 None。
+
+    判定顺序与 detection_rules.yaml 文档一致：
+      override_runtime 组 → openclaw 运行时 → 其余敏感组。
+    write_only 组还要求本次实际观测到写/创建/删除动作。
+    """
+    if path is None:
+        return None
+    actions = op.get("observed_actions") if op else None
+    if is_proc_self_access(path, op):
+        return None
+    openclaw_runtime = is_openclaw_runtime(path)
+    for rule in SENSITIVE_RULES:
+        if openclaw_runtime and not rule.override_runtime:
+            continue
+        if rule.matches_path(path) and rule.matches_actions(actions):
+            return rule
+    return None
+
+
+def classify(path: str | None, op: dict | None = None) -> str:
     if path is None:
         return "unknown"
+    if matching_sensitive_rule(path, op) is not None:
+        return "sensitive"
     if is_openclaw_runtime(path):
         return "runtime"
-    if path.startswith(SENSITIVE_PREFIXES) or is_sensitive_glob(path):
-        return "sensitive"
     if path.startswith(RUNTIME_PREFIXES):
         return "runtime"
     return "other"
@@ -547,15 +557,66 @@ def matching_allowed_actions(path: str | None, allowed: dict) -> set | None:
     return matched
 
 
+# 落在 network.ignored_endpoints 上的网络操作与基线一样折叠，用这条伪规则汇总。
+IGNORED_ENDPOINT_FOLD = {
+    "id": "ignored_network_endpoint",
+    "title": "忽略的网络端点",
+    "reason": "network.ignored_endpoints 配置的端点（工具拉取线上配置的本地回环），按正常处理",
+}
+FOLD_SAMPLE_LIMIT = 3
+
+
+def fold_rule(op: dict, category: str | None) -> dict | None:
+    """该越权操作应折叠到报告汇总时，返回折叠规则（id/title/reason），否则返回 None。"""
+    rule = matching_baseline_rule(op, category)
+    if rule is not None:
+        return {"id": rule.id, "title": rule.title, "reason": rule.reason}
+    if op.get("is_network") and is_ignored_endpoint(op.get("net_target")):
+        return IGNORED_ENDPOINT_FOLD
+    return None
+
+
+def add_fold(folded: dict, rule: dict, op: dict) -> None:
+    entry = folded.setdefault(rule["id"], {**rule, "count": 0, "samples": []})
+    entry["count"] += 1
+    sample = op.get("path") or op.get("net_detail") or op.get("hook_name")
+    if sample and sample not in entry["samples"] and len(entry["samples"]) < FOLD_SAMPLE_LIMIT:
+        entry["samples"].append(sample)
+
+
 def detect_anomalies(violations: list, kernel_ops: list, allowed: dict, net_observed: dict) -> dict:
     """依据两条规则给出明确判定：敏感文件越权、IR action 与实际行为不一致。"""
     types = []
 
-    sensitive_paths = sorted(
-        {v["path"] for v in violations if v.get("category") == "sensitive" and v.get("path")}
-    )
-    if sensitive_paths:
-        types.append({"type": "访问危险文件（敏感越权）", "paths": sensitive_paths})
+    sensitive_hits: dict = {}
+    for violation in violations:
+        if violation.get("category") != "sensitive" or not violation.get("path"):
+            continue
+        sensitive_hits.setdefault(
+            violation["path"],
+            {
+                "path": violation["path"],
+                "rule": violation.get("sensitive_rule"),
+                "title": violation.get("sensitive_title"),
+                "severity": violation.get("sensitive_severity"),
+                "attck": violation.get("sensitive_attck") or [],
+                "reason": violation.get("sensitive_reason"),
+                "basis": violation.get("sensitive_basis"),
+                "actions": set(),
+            },
+        )["actions"].update(violation.get("observed_actions") or [])
+    if sensitive_hits:
+        items = [
+            {**hit, "actions": sorted(hit["actions"])}
+            for hit in sorted(sensitive_hits.values(), key=lambda h: h["path"])
+        ]
+        types.append(
+            {
+                "type": "访问危险文件（敏感越权）",
+                "paths": [hit["path"] for hit in items],
+                "items": items,
+            }
+        )
 
     file_mismatches = []
     for op in kernel_ops:
@@ -620,6 +681,7 @@ def analyze_round(round_dir: Path) -> dict:
     net_observed = parse_network_activity(lsm, syscalls)
 
     violations = []
+    folded: dict = {}
     role_ir_mismatch = 0
     for op in kernel_ops:
         ir_violation = not is_allowed(op["path"], allowed["files"])
@@ -627,9 +689,22 @@ def analyze_round(round_dir: Path) -> dict:
         if ir_violation != role_violation:
             role_ir_mismatch += 1
         if ir_violation or role_violation:
+            category = classify(op["path"], op)
+            rule = fold_rule(op, category)
+            if rule is not None:
+                add_fold(folded, rule, op)
+                continue
             violation = dict(op)
             violation["kernel_category"] = violation.pop("category", None)
-            violation["category"] = classify(op["path"])
+            sensitive_rule = matching_sensitive_rule(op["path"], op)
+            violation["category"] = category
+            if sensitive_rule is not None:
+                violation["sensitive_rule"] = sensitive_rule.id
+                violation["sensitive_title"] = sensitive_rule.title
+                violation["sensitive_severity"] = sensitive_rule.severity
+                violation["sensitive_attck"] = list(sensitive_rule.attck)
+                violation["sensitive_reason"] = sensitive_rule.reason
+                violation["sensitive_basis"] = sensitive_rule.basis
             violation["by_ir_json"] = ir_violation
             violation["by_resource_role"] = role_violation
             violation["judges_agree"] = ir_violation == role_violation
@@ -656,16 +731,19 @@ def analyze_round(round_dir: Path) -> dict:
         "network_endpoints": sorted(net_observed["endpoints"]),
         "network_suppressed": net_observed["suppressed"],
         "network_ignored_endpoints": sorted(net_observed["ignored_endpoints"]),
+        "network_baseline_endpoints": sorted(net_observed["baseline_endpoints"]),
         "is_anomaly": anomaly["is_anomaly"],
         "anomaly_types": anomaly["types"],
         "user_actions": user_actions,
         "resource_facts": resource_facts,
+        "suppressed": sorted(folded.values(), key=lambda entry: (-entry["count"], entry["id"])),
         "counts": {
             "lsm_total": len(lsm),
             "syscall_total": len(syscalls),
             "kernel_file_ops": len(kernel_ops),
             "violations": len(violations),
             "judge_mismatch": role_ir_mismatch,
+            "suppressed": sum(entry["count"] for entry in folded.values()),
         },
         "violations": violations,
     }
@@ -673,18 +751,20 @@ def analyze_round(round_dir: Path) -> dict:
     sensitive = sum(1 for violation in violations if violation["category"] == "sensitive")
     log.info(
         "[%s] 分析完成 elapsed=%.3fs lsm_total=%d syscall_total=%d kernel_file_ops=%d "
-        "violations=%d sensitive=%d judge_mismatch=%d net_suppressed=%s net_ignored=%s "
-        "net_observed=%s net_endpoints=%s",
+        "violations=%d suppressed=%d sensitive=%d judge_mismatch=%d net_suppressed=%s net_ignored=%s "
+        "net_baseline=%s net_observed=%s net_endpoints=%s",
         result["round_id"],
         time.monotonic() - started,
         counts["lsm_total"],
         counts["syscall_total"],
         counts["kernel_file_ops"],
         counts["violations"],
+        counts["suppressed"],
         sensitive,
         counts["judge_mismatch"],
         net_observed["suppressed"],
         sorted(net_observed["ignored_endpoints"]),
+        sorted(net_observed["baseline_endpoints"]),
         sorted(net_observed["observed_actions"]),
         result["network_endpoints"],
     )
@@ -709,8 +789,24 @@ def write_outputs(round_dir: Path, result: dict) -> tuple[Path, Path]:
         add("- 异常类型:")
         for item in result["anomaly_types"]:
             if item["type"] == "访问危险文件（敏感越权）":
-                paths = ", ".join(f"`{p}`" for p in item["paths"])
-                add(f"  - {item['type']}: {paths}")
+                add(f"  - {item['type']}:")
+                # 同一敏感分组内的路径共享判定理由与依据，按组聚合输出，避免逐条重复。
+                grouped: dict = {}
+                for hit in item.get("items") or []:
+                    key = hit.get("rule") or hit.get("title") or "-"
+                    grouped.setdefault(key, {"meta": hit, "paths": []})["paths"].append(hit)
+                for group in grouped.values():
+                    meta = group["meta"]
+                    attck = f"，ATT&CK {'/'.join(meta['attck'])}" if meta.get("attck") else ""
+                    severity = meta.get("severity") or "high"
+                    add(f"    - [{severity}] {meta.get('title') or '敏感资源'}{attck} — 命中 {len(group['paths'])} 个路径")
+                    for hit in group["paths"]:
+                        actions = f"（{', '.join(hit['actions'])}）" if hit.get("actions") else ""
+                        add(f"      - `{hit['path']}`{actions}")
+                    if meta.get("reason"):
+                        add(f"      判定理由: {meta['reason']}")
+                    if meta.get("basis"):
+                        add(f"      规则依据: {meta['basis']}")
             elif item["type"] == "文件访问出现未授权动作":
                 add(f"  - {item['type']}:")
                 for mismatch in item["items"]:
@@ -737,9 +833,11 @@ def write_outputs(round_dir: Path, result: dict) -> tuple[Path, Path]:
         f"- 内核事件: LSM {counts['lsm_total']} 条 / syscall {counts['syscall_total']} 条 / "
         f"放行文件操作 {counts['kernel_file_ops']} 个"
     )
+    folded_total = counts.get("suppressed") or 0
+    folded_note = f"；另有 {folded_total} 条系统基线行为已折叠，见文末汇总" if folded_total else ""
     add(
         f"- **越权操作: {counts['violations']} 个**（ir_json 与内核 resource_role 判据分歧: "
-        f"{counts['judge_mismatch']} 处）\n"
+        f"{counts['judge_mismatch']} 处{folded_note}）\n"
     )
 
     add("## 用户态允许集 (ir_json)\n")
@@ -792,15 +890,28 @@ def write_outputs(round_dir: Path, result: dict) -> tuple[Path, Path]:
                 entry["count"] += 1
                 entry["read_bytes"] += violation.get("read_bytes", 0) or 0
                 entry["agree"].add(bool(violation["judges_agree"]))
+                if violation.get("sensitive_title"):
+                    attck = "/".join(violation.get("sensitive_attck") or [])
+                    entry["basis"] = (
+                        f"{violation['sensitive_title']}"
+                        f"（{violation.get('sensitive_severity') or 'high'}"
+                        f"{'，ATT&CK ' + attck if attck else ''}）"
+                    )
+            sensitive_table = category == "sensitive"
             add(f"#### {cat_title[category]}（{len(agg)} 个路径 / {len(items)} 次）\n")
-            add("| path | hook | 动作 | 次数 | 读取字节 | 判据一致 |")
-            add("|---|---|---|---|---|---|")
+            if sensitive_table:
+                add("| path | 敏感依据 | hook | 动作 | 次数 | 读取字节 | 判据一致 |")
+                add("|---|---|---|---|---|---|---|")
+            else:
+                add("| path | hook | 动作 | 次数 | 读取字节 | 判据一致 |")
+                add("|---|---|---|---|---|---|")
             for path in sorted(agg, key=lambda p: (-agg[p]["count"], p or "")):
                 entry = agg[path]
                 agree = {True: "yes", False: "no"}
                 agree_val = agree[next(iter(entry["agree"]))] if len(entry["agree"]) == 1 else "部分"
+                basis = f" {entry.get('basis', '-')} |" if sensitive_table else ""
                 add(
-                    f"| `{path}` | {', '.join(sorted(entry['hooks']))} | "
+                    f"| `{path}` |{basis} {', '.join(sorted(entry['hooks']))} | "
                     f"{', '.join(sorted(entry['actions']))} | {entry['count']} | "
                     f"{entry['read_bytes']} | {agree_val} |"
                 )
@@ -809,10 +920,16 @@ def write_outputs(round_dir: Path, result: dict) -> tuple[Path, Path]:
     add("### 网络\n")
     if result.get("network_suppressed"):
         ignored = ", ".join(f"`{e}`" for e in result.get("network_ignored_endpoints", []))
-        add(
-            "无（本轮网络连接目标均为忽略端点"
-            f"{'：' + ignored if ignored else ''}，为工具拉取线上配置，按正常处理）\n"
-        )
+        baseline = ", ".join(f"`{e}`" for e in result.get("network_baseline_endpoints") or [])
+        if baseline:
+            parts = [f"忽略端点 {ignored}（工具拉取线上配置）"] if ignored else []
+            parts.append(f"系统基线端点 {baseline}（本机 NSS 查询等）")
+            add(f"无（本轮网络连接目标均已排除：{'；'.join(parts)}，按正常处理）\n")
+        else:
+            add(
+                "无（本轮网络连接目标均为忽略端点"
+                f"{'：' + ignored if ignored else ''}，为工具拉取线上配置，按正常处理）\n"
+            )
     elif not net_viol:
         add("无\n")
     else:
@@ -838,6 +955,16 @@ def write_outputs(round_dir: Path, result: dict) -> tuple[Path, Path]:
             for (hook_name, behavior, detail, res), count in sorted(rows.items()):
                 add(f"| {behavior} | {hook_name} | {detail} | {res} | {count} |")
             add("")
+
+    if result.get("suppressed"):
+        add("## 已折叠的系统基线行为\n")
+        add("> 以下操作命中 detection_rules.yaml 的 system_baseline 或忽略端点，不计入越权清单、不参与网络判定；敏感命中不会被折叠。\n")
+        add("| 规则 | 说明 | 次数 | 示例 |")
+        add("|---|---|---|---|")
+        for entry in result["suppressed"]:
+            samples = ", ".join(f"`{sample}`" for sample in entry.get("samples") or []) or "-"
+            add(f"| {entry['title']} (`{entry['id']}`) | {entry.get('reason') or '-'} | {entry['count']} | {samples} |")
+        add("")
 
     if result["resource_facts"]:
         add("## 内核资源事实佐证 (round_kernel.kernel_resource_facts)\n")

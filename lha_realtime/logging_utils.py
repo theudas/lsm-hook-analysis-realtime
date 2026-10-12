@@ -17,7 +17,12 @@ def setup_logging(name: str, filename: str, log_dir: Path | None = None) -> logg
 
     logger = logging.getLogger(name)
     logger.setLevel(logging.INFO)
-    logger.handlers.clear()
+    # 先关闭再摘除：直接 clear() 会丢掉旧 FileHandler 的引用而不释放它持有的
+    # 文件句柄。StreamHandler.close() 不会关闭 sys.stdout，只有 FileHandler
+    # 才会关自己的文件，因此这里对两类 handler 都安全。
+    for handler in list(logger.handlers):
+        logger.removeHandler(handler)
+        handler.close()
     logger.propagate = False
 
     formatter = logging.Formatter(

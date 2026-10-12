@@ -1,0 +1,5 @@
+# 仅测试与覆盖率统计需要，生产运行不依赖。
+# 安装：python3 -m pip install -r requirements-dev.txt
+-r requirements.txt
+
+coverage>=7.0

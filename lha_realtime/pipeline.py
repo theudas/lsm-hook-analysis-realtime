@@ -233,9 +233,7 @@ class RealtimePipeline:
             state = self.store.record_round_input(str(round_id), generation, "round_end", path)
             # 向后兼容：旧上游把 IR 放在 round_end.ir_json 里；仅当尚无独立 IR 时采用。
             if payload.get("ir_json") and not state.get("has_ir"):
-                ir_state = self._record_ir(str(round_id), generation, round_dir, payload)
-                if ir_state is not None:
-                    state = ir_state
+                state = self._persist_ir(str(round_id), generation, round_dir, payload)
         else:
             path = round_dir / "round_kernel.json"
             atomic_write_json(path, payload)
@@ -263,14 +261,22 @@ class RealtimePipeline:
             log.info("[%s] round ready, queued analysis job_id=%s generation=%s", round_id, job_id, generation)
         return generation
 
+    def _persist_ir(self, round_id: str, generation: int, round_dir: Path, payload: dict[str, Any]) -> dict[str, Any]:
+        """Write the IR payload to ir.json and mark has_ir.
+
+        The caller must have checked that ``payload["ir_json"]`` is non-empty;
+        use :meth:`_record_ir` when that check still has to happen.
+        """
+        path = round_dir / "ir.json"
+        atomic_write_json(path, payload)
+        return self.store.record_round_input(round_id, generation, "round_ir", path)
+
     def _record_ir(self, round_id: str, generation: int, round_dir: Path, payload: dict[str, Any]) -> dict[str, Any] | None:
         """Persist a non-empty IR payload to ir.json and mark has_ir. Empty IR is skipped."""
         if not payload.get("ir_json"):
             log.info("[%s] IR 为空，跳过（等待真正的 round_ir_ready）generation=%s", round_id, generation)
             return None
-        path = round_dir / "ir.json"
-        atomic_write_json(path, payload)
-        return self.store.record_round_input(round_id, generation, "round_ir", path)
+        return self._persist_ir(round_id, generation, round_dir, payload)
 
     def _should_start_new_generation(self, round_id: str, push_type: str, round_dir: Path) -> bool:
         state = self.store.get_round(round_id)

@@ -177,12 +177,85 @@ sudo systemctl reset-failed lha_realtime.service
 - 重新等待四类消息 `round_start` / `round_end` / `round_kernel` / `round_ir_ready`。
 - 四者全部到达后重新分析，并按配置决定是否上报。
 
+## 7.1 内核行为豁免建议（热力图）
+
+用来及时发现可以加入豁免的高频内核行为（在项目根目录执行）：
+
+```bash
+python3 scripts/hotspot_stats.py --serve   # 打开 http://127.0.0.1:8765/ ，页面上的“刷新”按钮按需重新统计
+python3 scripts/hotspot_stats.py           # 只生成静态文件 reports/hotspot.html
+```
+
+- 只看内核侧事实（hook、读写动作、路径、端点），不看工具调用与 IR。已被 `system_baseline` / 忽略端点豁免的操作先排除。
+- “豁免建议”列出出现在 ≥ 20% round（`--threshold` 可调）的行为，逐项给出 建议豁免 / 需人工确认 / 不建议 及依据；
+  前两档附可展开的 YAML 片段，确认后合入 `detection_rules.yaml`，再点“刷新”即可看到它被折叠。
+- 判定口径：敏感命中、观测到写入/创建/删除、位于 `/tmp`、`/home`、`/root` 等用户可写目录 → 不建议；
+  含 `bprm_check`、未归为 runtime、本机 Unix socket 或回环端点 → 需人工确认；系统目录下的只读 runtime 行为、写终端/空设备 → 建议。
+  非本机网络地址不给配置，是否放行由人决定。
+- 刷新在子进程里进行，每次都会读到最新的规则文件和 `input/` 下新到的 round。`--serve` 默认只监听本机，
+  需要远程查看时用 `--host 0.0.0.0`（页面含路径信息，注意访问控制）。
+
 ## 8. 运行测试
+
+跑全部单元测试：
 
 ```bash
 cd /home/hx/try/lsm-hook-analysis-realtime
 python3 -m unittest discover -s tests -v
 ```
+
+### 8.1 覆盖率统计（白盒）
+
+先装测试依赖（只多一个 `coverage`，生产运行不需要）：
+
+```bash
+python3 -m pip install -r requirements-dev.txt
+```
+
+统计语句 + 分支覆盖率，并生成可点开逐行查看的 HTML 报告：
+
+```bash
+python3 -m coverage run -m unittest discover -s tests
+python3 -m coverage report      # 终端表格，带未覆盖行号
+python3 -m coverage html        # 输出到 reports/coverage/html/index.html
+```
+
+统计口径写在 `.coveragerc` 里（`branch = True`，只统计 `lha_realtime` 包），
+不需要在命令行重复指定参数。
+
+当前基线：**325 个用例，语句覆盖 100%，分支覆盖 100%**。
+
+### 8.2 测试文件分工
+
+| 文件 | 覆盖对象 |
+|---|---|
+| `test_realtime_pipeline.py` | 端到端链路、乱序到达、重复 round、敏感分类回归 |
+| `test_analyzer_parsing.py` | 输入加载、IR 解析、内核事件归并、网络端点回溯 |
+| `test_analyzer_report.py` | `analysis_report.md` 的全部渲染分支 |
+| `test_analyzer_push.py` | 上报 HTTP 链路的各种失败模式、mock round 识别 |
+| `test_rules_loading.py` | `detection_rules.yaml` 加载容错、glob 编译 |
+| `test_system_baseline.py` | `system_baseline` 折叠边界、按端点的网络判定 |
+| `test_hotspot_stats.py` | 豁免建议的判定边界、生成 YAML 的折叠效果 |
+| `test_state_store.py` | SQLite schema 迁移、round/job 状态机流转 |
+| `test_pipeline_internals.py` | 目录清理越界保护、消息分派早退、worker 生命周期 |
+| `test_receiver.py` | Socket.IO 回调分派、进程启动与清理路径 |
+| `test_config.py` | 环境变量解析与运行时目录准备 |
+| `test_logging_utils.py` | 日志 handler 的重建与句柄释放 |
+
+### 8.3 用例清单
+
+全部 325 个用例逐条列在 `tests/TEST_CASES.md`，按测试文件 → 测试类 → 用例编号组织，
+每条带验证点说明。该文件由测试源码解析生成，不手工维护；改动测试后重新生成：
+
+```bash
+cd /home/hx/try/lsm-hook-analysis-realtime
+python3 scripts/gen_testcases.py
+```
+
+生成结果与 `unittest` 实际收集到的用例逐名对齐，可用于验收对照。
+
+测试不会碰生产数据：所有用例都在临时目录里建库和落盘，`receiver` 的用例在
+import 前就把 `StateStore` / `RealtimePipeline` 换成替身，也不会发起真实连接。
 
 ## 9. 项目结构
 
@@ -191,16 +264,35 @@ lsm-hook-analysis-realtime/
 ├── lha_realtime/
 │   ├── analyzer.py        # round 分析、报告生成、报告上报
 │   ├── config.py          # 环境变量和默认路径配置
+│   ├── detection_rules.yaml # 敏感资源分组、系统基线折叠与判定依据（改这里无需改代码）
 │   ├── logging_utils.py   # 共享日志配置
 │   ├── pipeline.py        # inbox 消费、落盘、分析 worker、重复 round 处理
 │   ├── receiver.py        # Socket.IO 接收端
+│   ├── rules.py           # 加载 detection_rules.yaml，编译敏感规则
 │   └── state.py           # SQLite inbox、round state、analysis jobs
 ├── scripts/
+│   ├── gen_testcases.py            # 生成 tests/TEST_CASES.md
+│   ├── hotspot_stats.py            # 语料重放 → 内核行为豁免建议页面（--serve 支持页面内刷新）
+│   ├── hotspot_template.html       # 页面模板
 │   ├── redeploy_ignore_mock.sh
 │   └── redeploy_push_mock.sh
 ├── tests/
-│   └── test_realtime_pipeline.py
+│   ├── TEST_CASES.md               # 全部用例清单（自动生成）
+│   ├── test_realtime_pipeline.py   # 端到端链路与回归
+│   ├── test_analyzer_parsing.py    # 解析与内核事件归并
+│   ├── test_analyzer_report.py     # 报告渲染分支
+│   ├── test_analyzer_push.py       # 上报链路失败模式
+│   ├── test_rules_loading.py       # 规则加载与 glob 编译
+│   ├── test_system_baseline.py     # 系统基线折叠与网络端点判定
+│   ├── test_hotspot_stats.py       # 豁免建议判定与 YAML 片段
+│   ├── test_state_store.py         # SQLite 状态机
+│   ├── test_pipeline_internals.py  # 落盘工具与 worker
+│   ├── test_receiver.py            # Socket.IO 接收端
+│   ├── test_config.py              # 环境变量解析
+│   └── test_logging_utils.py       # 日志 handler 重建
 ├── receiver.py            # 兼容启动入口
+├── .coveragerc            # 覆盖率统计口径
 ├── requirements.txt
+├── requirements-dev.txt   # 测试依赖（coverage）
 └── README.md
 ```
