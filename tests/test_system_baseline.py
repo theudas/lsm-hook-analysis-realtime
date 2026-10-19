@@ -113,9 +113,18 @@ class BaselineRuleLoadingTest(unittest.TestCase):
         self.assertTrue(is_baseline_endpoint("AF_UNIX /var/run/nscd/socket"))
         self.assertFalse(is_baseline_endpoint("AF_INET 8.152.192.7:15100"))
 
-    def test_only_two_loopback_endpoints_are_ignored(self) -> None:
-        """忽略端点只有 127.0.0.1:15100 与 localhost:15100。"""
-        self.assertEqual(set(rules.IGNORED_NETWORK_ENDPOINTS), {"127.0.0.1:15100", "localhost:15100"})
+    def test_ignored_endpoints_are_exactly_the_configured_set(self) -> None:
+        """忽略端点恰为配置声明的五项：配置拉取入口 ×2、平台外联通道、回环校准端口 ×2。"""
+        self.assertEqual(
+            set(rules.IGNORED_NETWORK_ENDPOINTS),
+            {
+                "127.0.0.1:15100",
+                "localhost:15100",
+                "8.152.192.7:18788",
+                "127.0.0.1:46661",
+                "127.0.0.1:46163",
+            },
+        )
 
     def test_malformed_yaml_is_logged_as_error(self) -> None:
         """YAML 语法错误时输出 ERROR 日志，不再静默回退。"""
@@ -127,16 +136,34 @@ class BaselineRuleLoadingTest(unittest.TestCase):
 
 
 class PerEndpointNetworkTest(unittest.TestCase):
-    def test_nss_socket_only_round_is_suppressed(self) -> None:
-        """只连 nscd 的 round 整轮网络按正常处理，端点记为系统基线。"""
+    def test_traffic_attributed_to_nss_socket_is_excluded(self) -> None:
+        """能归属到 nscd 的收发不计入，端点记为系统基线；只有基线端点时不整轮抑制。"""
+        observed = parse_network_activity(
+            [], [connect("c-1", 3, 1, sun_path="/var/run/nscd/socket"), io("sendto", "s-2", 3, 2)]
+        )
+        self.assertEqual(observed["actions"], set())
+        self.assertFalse(observed["suppressed"])
+        self.assertEqual(observed["baseline_endpoints"], {"/var/run/nscd/socket"})
+        self.assertEqual(observed["ignored_endpoints"], set())
+
+    def test_baseline_endpoint_does_not_absorb_unattributed_traffic(self) -> None:
+        """回归：socketpair 的 LSM 收发不带地址，不能因为本轮只连过 nscd 就被当成 NSS 查询吞掉。"""
+        observed = parse_network_activity(
+            [lsm_hook("h-5", "socket_sendmsg"), lsm_hook("h-6", "socket_recvmsg")],
+            [connect("c-1", 3, 1, sun_path="/var/run/nscd/socket")],
+        )
+        self.assertFalse(observed["suppressed"])
+        self.assertEqual(observed["actions"], {"send", "receive"})
+
+    def test_ignored_endpoint_still_absorbs_unattributed_traffic(self) -> None:
+        """忽略端点保留原语义：可识别端点全部被排除且含忽略端点时，整轮按正常处理。"""
         observed = parse_network_activity(
             [lsm_hook("h-5", "socket_sendmsg")],
-            [connect("c-1", 3, 1, sun_path="/var/run/nscd/socket"), io("sendto", "s-2", 3, 2)],
+            [connect("c-1", 3, 1, remote_ip="127.0.0.1", remote_port="15100"),
+             connect("c-2", 4, 2, sun_path="/var/run/nscd/socket")],
         )
         self.assertTrue(observed["suppressed"])
         self.assertEqual(observed["actions"], set())
-        self.assertEqual(observed["baseline_endpoints"], {"/var/run/nscd/socket"})
-        self.assertEqual(observed["ignored_endpoints"], set())
 
     def test_actions_on_excluded_endpoints_do_not_count_when_another_endpoint_exists(self) -> None:
         """send 落在忽略端点、receive 落在外部端点：只有 receive 计入判定。"""
@@ -251,7 +278,8 @@ class BaselineFoldingRoundTest(unittest.TestCase):
                          args={"sa_family": "AF_UNIX", "remote_addr": {"sun_path": "/var/run/nscd/socket"}}),
                 lsm_hook("h-3", "socket_sendmsg"),
             ],
-            [connect("c-1", 3, 1, sun_path="/var/run/nscd/socket"), io("sendto", "s-2", 3, 2)],
+            [connect("c-1", 3, 1, sun_path="/var/run/nscd/socket"), io("sendto", "s-2", 3, 2),
+             connect("c-3", 4, 3, remote_ip="127.0.0.1", remote_port="15100")],
         )
         result = analyze_round(self.round_dir)
         _, report_path = write_outputs(self.round_dir, result)
@@ -259,6 +287,7 @@ class BaselineFoldingRoundTest(unittest.TestCase):
 
         self.assertFalse(result["is_anomaly"])
         self.assertIn("另有 2 条系统基线行为已折叠，见文末汇总", report)
+        self.assertIn("忽略端点 `127.0.0.1:15100`（工具拉取线上配置）", report)
         self.assertIn("## 已折叠的系统基线行为", report)
         self.assertIn("| 运行时库内存保护变更 (`runtime_mprotect`) |", report)
         self.assertIn("系统基线端点 `/var/run/nscd/socket`（本机 NSS 查询等）", report)

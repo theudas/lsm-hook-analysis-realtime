@@ -421,7 +421,7 @@
 | 192 | `test_actions_condition_requires_all_observed_actions_to_be_declared` | actions: [read] 只豁免纯读取；带写入或动作未知的操作不匹配。 |
 | 193 | `test_sensitive_category_is_never_folded` | 即使基线条件全部成立，敏感命中也不会被折叠。 |
 | 194 | `test_packaged_yaml_declares_baseline_rules` | 随包 YAML 声明了全部基线规则，平台地址不是基线端点。 |
-| 195 | `test_only_two_loopback_endpoints_are_ignored` | 忽略端点只有 127.0.0.1:15100 与 localhost:15100。 |
+| 195 | `test_ignored_endpoints_are_exactly_the_configured_set` | 忽略端点恰为配置声明的五项：127.0.0.1:15100、localhost:15100、8.152.192.7:18788（平台外联）、127.0.0.1:46661/46163（回环校准）。 |
 | 196 | `test_malformed_yaml_is_logged_as_error` | YAML 语法错误时输出 ERROR 日志，不再静默回退。 |
 
 ### PerEndpointNetworkTest

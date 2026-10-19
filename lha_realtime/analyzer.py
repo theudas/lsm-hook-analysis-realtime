@@ -371,9 +371,9 @@ def parse_network_activity(lsm: list, syscalls: list) -> dict:
     以及 system_baseline 声明的本机系统端点（nscd / sssd 的 Unix socket 等）。
 
     - 能关联到端点的动作：端点被排除则不计入，否则计入。
-    - 无法关联端点的动作（LSM 层 sendmsg/recvmsg 不带地址）：若本轮所有可识别端点
-      都被排除，则视为发生在这些端点上、整轮按正常处理；只要出现其他端点（如
-      8.152.192.7:15100），或无法识别任何端点，则照常计入。
+    - 无法关联端点的动作（LSM 层 sendmsg/recvmsg 不带地址）：若本轮可识别端点全部
+      被排除、且其中有配置的忽略端点，则视为发生在忽略端点上、整轮按正常处理；
+      只有基线端点、出现其他端点（如 8.152.192.7:15100）或无法识别任何端点时照常计入。
     """
     conns = connect_endpoints(syscalls)
 
@@ -427,8 +427,10 @@ def parse_network_activity(lsm: list, syscalls: list) -> dict:
     ignored_endpoints = {e for e in all_endpoints if is_ignored_endpoint(e)}
     baseline_endpoints = {e for e in all_endpoints - ignored_endpoints if is_baseline_endpoint(e)}
     remaining_endpoints = all_endpoints - ignored_endpoints - baseline_endpoints
-    # 存在可识别端点且全部被排除 → 整轮网络视为正常。
-    suppressed = bool(all_endpoints) and not remaining_endpoints
+    # 可识别端点全部被排除、且其中有配置的忽略端点 → 整轮网络视为正常。
+    # 只有基线端点时不整轮抑制：基线端点（如 nscd）只排除确实归属到它的收发，
+    # 不“吸收”无法归属的 LSM 收发——那些可能来自 socketpair 等真实的本地 IPC。
+    suppressed = bool(ignored_endpoints) and not remaining_endpoints
     effective_actions = set() if suppressed else attributed_actions | unattributed_actions
 
     return {
@@ -922,9 +924,10 @@ def write_outputs(round_dir: Path, result: dict) -> tuple[Path, Path]:
         ignored = ", ".join(f"`{e}`" for e in result.get("network_ignored_endpoints", []))
         baseline = ", ".join(f"`{e}`" for e in result.get("network_baseline_endpoints") or [])
         if baseline:
-            parts = [f"忽略端点 {ignored}（工具拉取线上配置）"] if ignored else []
-            parts.append(f"系统基线端点 {baseline}（本机 NSS 查询等）")
-            add(f"无（本轮网络连接目标均已排除：{'；'.join(parts)}，按正常处理）\n")
+            add(
+                f"无（本轮网络连接目标均已排除：忽略端点 {ignored}（工具拉取线上配置）；"
+                f"系统基线端点 {baseline}（本机 NSS 查询等），按正常处理）\n"
+            )
         else:
             add(
                 "无（本轮网络连接目标均为忽略端点"
