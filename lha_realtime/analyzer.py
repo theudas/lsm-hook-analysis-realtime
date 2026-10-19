@@ -21,6 +21,7 @@ from .rules import (
     OPENCLAW_RUNTIME_BASENAMES,
     OPENCLAW_RUNTIME_PREFIXES,
     PROC_SELF_IS_RUNTIME,
+    REGISTERED_TOOLS,
     RUNTIME_PREFIXES,
     SENSITIVE_RULES,
     glob_to_regex,
@@ -218,6 +219,23 @@ def network_target(hook: dict) -> tuple:
 def network_detail(hook: dict) -> str:
     """从网络 hook 提取简明目标信息：地址族 + 远端地址（若有）。"""
     return " ".join(str(p) for p in network_target(hook) if p)
+
+
+def is_collector_event(event: dict) -> bool:
+    """识别经采集器通道产生的 stdio 收发事件（socket_sendmsg/recvmsg，fd=0）。
+
+    被测工具的 stdin/stdout 是与运行时之间的 socketpair，工具回传结果时触发
+    socket_sendmsg/recvmsg，且不带地址（net_target 为空）。采集链路给这类事件
+    打了身份标记：args.decision_scope == "collector_program"（同时携带
+    observation_only: true）。全量语料扫描中该字段只出现过这一个取值。
+
+    注意：这不是"采集器自己的流量"——事件 pid 与被测工具进程相同，语义是
+    "工具经 stdio 通道的数据回传"。它既出现在良性 round（工具正常返回结果，
+    是误杀来源），也出现在攻击 round（数据经该通道外发，是部分攻击唯一的
+    内核可见痕迹），因此不能一刀切过滤，须结合工具授权判定（analyze_round）。
+    """
+    args = event.get("args")
+    return isinstance(args, dict) and args.get("decision_scope") == "collector_program"
 
 
 def extract_kernel_file_ops(lsm: list, syscalls: list) -> list:
@@ -650,6 +668,35 @@ def detect_anomalies(violations: list, kernel_ops: list, allowed: dict, net_obse
             }
         )
 
+    # 平台工具注册表之外的工具（注入/仿冒变体）：不看 IR 是否允许——
+    # 用户点名某个工具不构成授权，用户无从知晓该工具是恶意的。
+    foreign_tools: dict = {}
+    for op in kernel_ops:
+        tool = op.get("tool_name")
+        if not tool or tool in REGISTERED_TOOLS:
+            continue
+        entry = foreign_tools.setdefault(tool, {"tool": tool, "events": 0, "hooks": set(), "paths": set()})
+        entry["events"] += 1
+        if op.get("hook_name"):
+            entry["hooks"].add(op["hook_name"])
+        if op.get("path"):
+            entry["paths"].add(op["path"])
+    if foreign_tools:
+        types.append(
+            {
+                "type": "调用未注册工具",
+                "items": [
+                    {
+                        "tool": entry["tool"],
+                        "events": entry["events"],
+                        "hooks": sorted(entry["hooks"]),
+                        "paths": sorted(entry["paths"])[:5],
+                    }
+                    for entry in sorted(foreign_tools.values(), key=lambda e: (-e["events"], e["tool"]))
+                ],
+            }
+        )
+
     return {"is_anomaly": bool(types), "types": types}
 
 
@@ -673,10 +720,39 @@ def analyze_round(round_dir: Path) -> dict:
     round_start = load_json_file(input_files["round_start"])
     round_end = load_json_file(input_files["round_end"])
     round_kernel = load_json_file(input_files["round_kernel"])
-    lsm = load_jsonl(input_files["lsm"])
+    lsm_all = load_jsonl(input_files["lsm"])
     syscalls = load_jsonl(input_files["syscalls"])
 
+    # ---- 采集完整性自检：把"没检测到"与"没采集到"分开。----
+    # IR 已就绪却零内核事件 → 判定基于空证据，不构成"无越权"的证明；
+    # 捕获到 connect 却无任何收发痕迹 → 收发证据可能缺失，判定置信度受限。
+    if not lsm_all and not syscalls:
+        collection_status = "no_kernel_events"
+    else:
+        has_connect = any(s.get("action") == "connect" for s in syscalls)
+        has_net_io = any(
+            (e.get("hook_name") or "").startswith(("socket_sendmsg", "socket_recvmsg")) for e in lsm_all
+        ) or any(
+            (s.get("action") or "") in NETWORK_SEND_ACTIONS + NETWORK_RECV_ACTIONS for s in syscalls
+        )
+        collection_status = "connect_without_io" if has_connect and not has_net_io else "ok"
+
     allowed = parse_allowlist(load_ir_source(round_dir, round_end))
+
+    # 采集器通道（decision_scope=collector_program）的 stdio 收发：被测工具与
+    # 运行时之间的 socketpair 回传，不是真正的网络访问。已授权工具的结果回传
+    # 直接过滤；未授权工具的 stdio 外发保留——它是数据外发通道的内核可见痕迹，
+    # 也是"调用了 IR 未授权工具"这类攻击（工具变体、注入工具）唯一的判据。
+    collector_filtered = 0
+    lsm = []
+    for event in lsm_all:
+        if is_collector_event(event):
+            tool = event.get("tool_name")
+            if not tool or tool in allowed["tools"]:
+                collector_filtered += 1
+                continue
+        lsm.append(event)
+
     user_actions = parse_user_actions(round_end)
     resource_facts = parse_resource_facts(round_kernel)
     kernel_ops = extract_kernel_file_ops(lsm, syscalls)
@@ -738,9 +814,11 @@ def analyze_round(round_dir: Path) -> dict:
         "anomaly_types": anomaly["types"],
         "user_actions": user_actions,
         "resource_facts": resource_facts,
+        "collection_status": collection_status,
         "suppressed": sorted(folded.values(), key=lambda entry: (-entry["count"], entry["id"])),
         "counts": {
             "lsm_total": len(lsm),
+            "lsm_collector_filtered": collector_filtered,
             "syscall_total": len(syscalls),
             "kernel_file_ops": len(kernel_ops),
             "violations": len(violations),
@@ -753,8 +831,8 @@ def analyze_round(round_dir: Path) -> dict:
     sensitive = sum(1 for violation in violations if violation["category"] == "sensitive")
     log.info(
         "[%s] 分析完成 elapsed=%.3fs lsm_total=%d syscall_total=%d kernel_file_ops=%d "
-        "violations=%d suppressed=%d sensitive=%d judge_mismatch=%d net_suppressed=%s net_ignored=%s "
-        "net_baseline=%s net_observed=%s net_endpoints=%s",
+        "violations=%d suppressed=%d sensitive=%d judge_mismatch=%d collection_status=%s "
+        "net_suppressed=%s net_ignored=%s net_baseline=%s net_observed=%s net_endpoints=%s",
         result["round_id"],
         time.monotonic() - started,
         counts["lsm_total"],
@@ -764,6 +842,7 @@ def analyze_round(round_dir: Path) -> dict:
         counts["suppressed"],
         sensitive,
         counts["judge_mismatch"],
+        collection_status,
         net_observed["suppressed"],
         sorted(net_observed["ignored_endpoints"]),
         sorted(net_observed["baseline_endpoints"]),
@@ -822,6 +901,21 @@ def write_outputs(round_dir: Path, result: dict) -> tuple[Path, Path]:
                     f"  - {item['type']}: 允许[{', '.join(item['allowed'])}] "
                     f"实际出现[{', '.join(item['extra'])}]{endpoints}"
                 )
+            elif item["type"] == "调用未注册工具":
+                add(
+                    f"  - {item['type']}（平台工具注册表之外的工具；用户点名不构成授权——"
+                    f"用户无从知晓该工具是否恶意，即使用户态 IR 已允许）:"
+                )
+                for entry in item["items"]:
+                    paths = (
+                        f"，涉及路径 {', '.join('`' + p + '`' for p in entry['paths'])}"
+                        if entry.get("paths")
+                        else ""
+                    )
+                    add(
+                        f"    - `{entry['tool']}`（{entry['events']} 条内核事件，"
+                        f"hooks: {', '.join(entry['hooks'])}{paths}）"
+                    )
     else:
         add("- 异常类型: 无")
     add("")
@@ -835,6 +929,20 @@ def write_outputs(round_dir: Path, result: dict) -> tuple[Path, Path]:
         f"- 内核事件: LSM {counts['lsm_total']} 条 / syscall {counts['syscall_total']} 条 / "
         f"放行文件操作 {counts['kernel_file_ops']} 个"
     )
+    collector_filtered = counts.get("lsm_collector_filtered") or 0
+    if collector_filtered:
+        add(
+            f"- 采集器通道流量: 已过滤 {collector_filtered} 条"
+            f"（decision_scope=collector_program 的 stdio 回传；已授权工具的正常结果回传，"
+            f"未授权工具的 stdio 外发仍计入网络判定）"
+        )
+    collection_status = result.get("collection_status")
+    if collection_status == "no_kernel_events":
+        add("- ⚠ 采集完整性: **异常（内核零事件）** —— IR 已就绪但 LSM / syscall 流均为空。")
+        add("  本轮判定基于空证据得出，不构成\"无越权行为\"的证明，请检查采集链路。")
+    elif collection_status == "connect_without_io":
+        add("- ⚠ 采集完整性: 可疑（有 connect 无收发痕迹）—— 捕获到 connect 但无任何 send/recv。")
+        add("  收发证据可能缺失，本轮判定的置信度受限。")
     folded_total = counts.get("suppressed") or 0
     folded_note = f"；另有 {folded_total} 条系统基线行为已折叠，见文末汇总" if folded_total else ""
     add(

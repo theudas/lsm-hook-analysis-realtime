@@ -753,6 +753,49 @@
 | 324 | `test_logging_still_works_after_reconfiguration` | 重新配置后日志仍能正常写入。 |
 | 325 | `test_separate_names_get_separate_loggers` | 不同名字得到独立 logger 与独立日志文件。 |
 
+### CollectorEventPredicateTest / CollectorFilterRoundTest
+
+| 编号 | 用例 | 验证点 |
+|---|---|---|
+| 326 | `test_signature` | decision_scope=collector_program 即采集器通道 stdio 事件。 |
+| 327 | `test_plain_events_are_not_collector_channel` | 无标记 / 其他 decision_scope / args 非字典的事件不属于采集器通道。 |
+| 328 | `test_authorized_tool_stdio_is_filtered` | IR 已授权工具的 stdio 回传过滤，不进网络判定。 |
+| 329 | `test_unauthorized_tool_stdio_counts_as_network` | 未授权工具的 stdio 外发计入网络判定（数据外发通道痕迹）。 |
+| 330 | `test_stdio_without_tool_attribution_is_filtered` | 无工具归因的 stdio 收发保守过滤。 |
+| 331 | `test_authorized_stdio_alongside_normal_activity` | 良性文件读 + 已授权 stdio 混合同轮：判"否"。 |
+| 332 | `test_unmarked_sendmsg_still_counts` | 不带标记的 sendmsg 照常计入，过滤不能过宽。 |
+| 333 | `test_report_notes_filtered_count` | 报告注明被过滤的 stdio 条数与规则。 |
+| 334 | `test_report_without_collector_events_omits_the_note` | 没有采集器通道事件时不渲染注记。 |
+
+### CollectionStatusRoundTest
+
+| 编号 | 用例 | 验证点 |
+|---|---|---|
+| 335 | `test_zero_kernel_events_is_flagged` | IR 就绪但内核零事件：标"采集异常"，判定基于空证据不作数。 |
+| 336 | `test_connect_without_io_is_flagged_as_suspect` | 只有 connect 无收发：标"可疑"，收发证据可能缺失。 |
+| 337 | `test_connect_with_sendmsg_is_ok` | connect + LSM 层 sendmsg：状态 ok。 |
+| 338 | `test_connect_with_syscall_sendto_is_ok` | connect + syscall 层 sendto：状态 ok。 |
+| 339 | `test_file_only_round_is_ok` | 纯文件 round：正常，无采集告警注记。 |
+| 340 | `test_collector_stdio_counts_as_io_evidence` | 采集器通道 stdio 痕迹也算收发证据，不误报"可疑"。 |
+
+### RegistryContractTest / ToolRegistryRoundTest
+
+| 编号 | 用例 | 验证点 |
+|---|---|---|
+| 341 | `test_registered_tools_are_exactly_the_configured_set` | 注册表恰为配置八项：平台内建 ×7 + safe_file_reader__read_text。 |
+| 342 | `test_default_registry_is_used_when_yaml_section_missing` | YAML 缺 tools 段回退内置默认，服务可运行。 |
+| 343 | `test_foreign_tool_alarms_even_when_ir_allows_it` | **核心**：IR 明文允许的未注册工具照样判异常——用户点名 ≠ 授权。 |
+| 344 | `test_platform_tools_do_not_trigger` | 平台注册工具的常规操作不触发未注册工具异常。 |
+| 345 | `test_ir_authorized_unregistered_tool_stdio_still_fires_via_file_events` | IR 允许的未注册工具：stdio 过滤后由文件事件触发注册表异常。 |
+| 346 | `test_report_renders_unregistered_tool` | 报告渲染未注册工具条目（工具名、事件数、hooks、样例路径）。 |
+| 347 | `test_events_without_tool_attribution_are_ignored` | 无工具归因的事件不参与注册表判定。 |
+
+### AnalyzerActionMismatchTest（2026-10-19 修订）
+
+| 编号 | 用例 | 验证点 |
+|---|---|---|
+| 348 | `test_d04795d0_collector_traffic_does_not_mark_round_anomalous` | 真实 round d04795d0：仅剩采集器标记的 stdio 收发，判"否"（修正旧断言锁定的误杀行为）。 |
+
 ---
 
 ## 如何重新生成

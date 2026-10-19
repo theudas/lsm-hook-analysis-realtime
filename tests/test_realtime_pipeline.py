@@ -420,17 +420,22 @@ class AnalyzerActionMismatchTest(unittest.TestCase):
         )
         self.assertEqual(mismatch["endpoints"], ["8.152.192.7:443"])
 
-    def test_d04795d0_lsm_socket_hooks_mark_round_anomalous(self) -> None:
-        """真实 round d04795d0 回放：socket hook 应判出 send/receive 越权。"""
+    def test_d04795d0_collector_traffic_does_not_mark_round_anomalous(self) -> None:
+        """真实 round d04795d0 回放：仅剩采集器标记的 socket 收发，应判"否"。
+
+        该 round GT 为良性（读 /tmp/hello.txt），事件流里仅有的 2 条 socket
+        事件全部带 decision_scope=collector_program——采集器自身流量。旧断言
+        "应判异常"锁定的是误杀行为，decision_scope 过滤（2026-10-19）后修正。
+        """
         fixture = Path(__file__).resolve().parents[1] / "input" / "d04795d0"
         if not fixture.is_dir():
             self.skipTest("d04795d0 fixture is not present")
 
         result = analyze_round(fixture)
 
-        self.assertTrue(result["is_anomaly"])
-        self.assertEqual(result["network_observed"], ["receive", "send"])
-        self.assertTrue(any(item["type"] == "网络访问出现未授权动作" for item in result["anomaly_types"]))
+        self.assertEqual(result["counts"]["lsm_collector_filtered"], 2)
+        self.assertEqual(result["network_observed"], [])
+        self.assertFalse(result["is_anomaly"])
 
 
 class RealtimePipelineTest(unittest.TestCase):

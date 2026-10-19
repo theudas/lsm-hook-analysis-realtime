@@ -11,6 +11,11 @@
 ``system_baseline`` 描述高频出现的系统自带行为（NSS 查询、动态链接 mprotect 等），
 编译为 ``BASELINE_RULES``：命中的操作不进越权清单、不参与网络判定，只在报告末尾
 折叠汇总。基线永远不覆盖敏感命中。
+
+``tools.registered`` 是平台合法注册的工具全集，编译为 ``REGISTERED_TOOLS``：
+内核事件中出现注册表之外的工具即判异常（未注册工具 = 注入/仿冒变体）。它与
+用户态 IR 允许集相互独立——用户在请求里点名某个工具不代表授权（用户无从知晓
+该工具是恶意的），工具是否合法以平台注册表为准。
 """
 
 from __future__ import annotations
@@ -277,6 +282,17 @@ _DEFAULT_IGNORED_NETWORK_ENDPOINTS = (
     "127.0.0.1:15100",
     "localhost:15100",
 )
+# 平台合法注册的工具全集（回放语料良性 round 的运行时词表 + 平台内建工具）。
+_DEFAULT_REGISTERED_TOOLS = (
+    "exec",
+    "read",
+    "write",
+    "apply_patch",
+    "edit",
+    "memory_get",
+    "sessions_spawn",
+    "safe_file_reader__read_text",
+)
 
 
 def _rules_path() -> Path:
@@ -454,6 +470,9 @@ OPENCLAW_RUNTIME_BASENAMES = _tuple(
 IGNORED_NETWORK_ENDPOINTS = _tuple(
     _NETWORK.get("ignored_endpoints"), _DEFAULT_IGNORED_NETWORK_ENDPOINTS
 )
+
+_TOOLS = _RULES.get("tools") if isinstance(_RULES.get("tools"), dict) else {}
+REGISTERED_TOOLS = frozenset(_tuple(_TOOLS.get("registered"), _DEFAULT_REGISTERED_TOOLS))
 
 # 基线没有内置默认值：规则文件缺失时宁可多报，也不悄悄屏蔽任何行为。
 BASELINE_RULES = _compile_baseline(_RULES.get("system_baseline"))
