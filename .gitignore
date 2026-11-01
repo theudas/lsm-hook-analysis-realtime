@@ -15,3 +15,4 @@ reports/
 htmlcov/
 .DS_Store
 tests.zip
+.claude/

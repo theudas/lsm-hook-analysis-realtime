@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SERVICE_NAME="lha_realtime.service"
-PROJECT_DIR="/home/hx/try/lsm-hook-analysis-realtime"
+PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-/usr/bin/python3}"
 
 cd "$PROJECT_DIR"

@@ -30,7 +30,7 @@ Socket.IO push
 默认模式：`is_mock=true` 的 round 会分析并生成报告，但不会上报。
 
 ```bash
-cd /home/hx/try/lsm-hook-analysis-realtime
+cd lsm-hook-analysis-realtime
 bash scripts/redeploy_ignore_mock.sh
 ```
 
@@ -39,7 +39,7 @@ bash scripts/redeploy_ignore_mock.sh
 测试模式：`is_mock=true` 的 round 也会分析并上报。
 
 ```bash
-cd /home/hx/try/lsm-hook-analysis-realtime
+cd lsm-hook-analysis-realtime
 bash scripts/redeploy_push_mock.sh
 ```
 
@@ -78,7 +78,7 @@ sudo systemctl stop lha_realtime.service
 查看本地日志：
 
 ```bash
-cd /home/hx/try/lsm-hook-analysis-realtime
+cd lsm-hook-analysis-realtime
 tail -f logs/receiver.log
 tail -f logs/pipeline.log
 tail -f logs/analyzer.log
@@ -89,7 +89,7 @@ tail -f logs/analyzer.log
 如果只是临时调试，不想注册 systemd 服务，可以前台启动：
 
 ```bash
-cd /home/hx/try/lsm-hook-analysis-realtime
+cd lsm-hook-analysis-realtime
 python3 -m pip install -r requirements.txt
 python3 -m lha_realtime.receiver
 ```
@@ -97,14 +97,14 @@ python3 -m lha_realtime.receiver
 也可以使用兼容入口：
 
 ```bash
-cd /home/hx/try/lsm-hook-analysis-realtime
+cd lsm-hook-analysis-realtime
 python3 receiver.py
 ```
 
 临时后台启动：
 
 ```bash
-cd /home/hx/try/lsm-hook-analysis-realtime
+cd lsm-hook-analysis-realtime
 mkdir -p logs
 nohup python3 receiver.py > logs/service.out 2>&1 &
 ```
@@ -114,6 +114,8 @@ nohup python3 receiver.py > logs/service.out 2>&1 &
 通常直接用第 2 节的一键脚本即可。需要手动部署时，可以按下面步骤操作。
 
 ### 5.1 写入 Service 文件
+
+systemd 要求 `WorkingDirectory` 和 `ExecStart` 用绝对路径，把下面的 `/path/to/lsm-hook-analysis-realtime` 替换成实际部署路径：
 
 ```bash
 sudo tee /etc/systemd/system/lha_realtime.service >/dev/null <<'EOF'
@@ -125,8 +127,8 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/home/hx/try/lsm-hook-analysis-realtime
-ExecStart=/usr/bin/python3 /home/hx/try/lsm-hook-analysis-realtime/receiver.py
+WorkingDirectory=/path/to/lsm-hook-analysis-realtime
+ExecStart=/usr/bin/python3 /path/to/lsm-hook-analysis-realtime/receiver.py
 Restart=always
 RestartSec=5
 Environment=PYTHONUNBUFFERED=1
@@ -200,7 +202,7 @@ python3 scripts/hotspot_stats.py           # 只生成静态文件 reports/hotsp
 跑全部单元测试：
 
 ```bash
-cd /home/hx/try/lsm-hook-analysis-realtime
+cd lsm-hook-analysis-realtime
 python3 -m unittest discover -s tests -v
 ```
 
@@ -223,7 +225,7 @@ python3 -m coverage html        # 输出到 reports/coverage/html/index.html
 统计口径写在 `.coveragerc` 里（`branch = True`，只统计 `lha_realtime` 包），
 不需要在命令行重复指定参数。
 
-当前基线：**325 个用例，语句覆盖 100%，分支覆盖 100%**。
+当前基线：**350 个用例，语句覆盖 100%，分支覆盖 100%**。
 
 ### 8.2 测试文件分工
 
@@ -233,6 +235,8 @@ python3 -m coverage html        # 输出到 reports/coverage/html/index.html
 | `test_analyzer_parsing.py` | 输入加载、IR 解析、内核事件归并、网络端点回溯 |
 | `test_analyzer_report.py` | `analysis_report.md` 的全部渲染分支 |
 | `test_analyzer_push.py` | 上报 HTTP 链路的各种失败模式、mock round 识别 |
+| `test_collector_filter.py` | collector stdio 收发按工具授权区分过滤 |
+| `test_collection_status.py` | 空内核流标采集异常、connect 无收发标可疑 |
 | `test_rules_loading.py` | `detection_rules.yaml` 加载容错、glob 编译 |
 | `test_system_baseline.py` | `system_baseline` 折叠边界、按端点的网络判定 |
 | `test_hotspot_stats.py` | 豁免建议的判定边界、生成 YAML 的折叠效果 |
@@ -248,7 +252,7 @@ python3 -m coverage html        # 输出到 reports/coverage/html/index.html
 每条带验证点说明。该文件由测试源码解析生成，不手工维护；改动测试后重新生成：
 
 ```bash
-cd /home/hx/try/lsm-hook-analysis-realtime
+cd lsm-hook-analysis-realtime
 python3 scripts/gen_testcases.py
 ```
 
@@ -282,6 +286,8 @@ lsm-hook-analysis-realtime/
 │   ├── test_analyzer_parsing.py    # 解析与内核事件归并
 │   ├── test_analyzer_report.py     # 报告渲染分支
 │   ├── test_analyzer_push.py       # 上报链路失败模式
+│   ├── test_collector_filter.py    # 采集器 stdio 通道过滤
+│   ├── test_collection_status.py   # 采集完整性自检
 │   ├── test_rules_loading.py       # 规则加载与 glob 编译
 │   ├── test_system_baseline.py     # 系统基线折叠与网络端点判定
 │   ├── test_hotspot_stats.py       # 豁免建议判定与 YAML 片段
