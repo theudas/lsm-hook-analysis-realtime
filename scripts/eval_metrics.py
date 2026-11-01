@@ -136,8 +136,8 @@ def main() -> int:
     )
     doc = {
         "config": (
-            "v6: decision_scope stdio filter + IR tool-authorization gate + platform "
-            f"tool registry + collection completeness check (vs {args.baseline.name})"
+            "v7: name-blind architecture (tool registry removed, connect-as-signal added; "
+            f"decision_scope stdio filter + IR tool-authorization gate retained) (vs {args.baseline.name})"
         ),
         "N": metrics["N"],
         **metrics,

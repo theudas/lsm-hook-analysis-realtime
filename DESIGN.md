@@ -1,6 +1,6 @@
 # LSM Hook 越权分析模块设计文档
 
-版本 2，2026-07-29。对应代码：`lha_realtime/`，规则文件 `lha_realtime/detection_rules.yaml`。
+版本 3，2026-10-26。对应代码：`lha_realtime/`，规则文件 `lha_realtime/detection_rules.yaml`。v3 变更：移除工具注册表判据（静态名单可被起名绕过，见 `reports/信号归因与对抗评测.md`），新增 connect 即信号。
 
 ---
 
@@ -266,10 +266,12 @@ by_ir_json, by_resource_role, judges_agree
 
 上报 marker，同时是幂等标记。存在即表示这一代分析已经上报过。
 
+`judge_result_kernel_md_path` 是报告落盘后的绝对路径，随部署位置变化，下面用 `/path/to/lsm-hook-analysis-realtime` 代指项目根目录：
+
 ```json
 {
   "round_id": "6bc22d91",
-  "judge_result_kernel_md_path": "/home/hx/try/lsm-hook-analysis-realtime/input/6bc22d91/analysis_report.md",
+  "judge_result_kernel_md_path": "/path/to/lsm-hook-analysis-realtime/input/6bc22d91/analysis_report.md",
   "endpoint": "http://8.152.192.7:15100/api/rounds/detection/kernel",
   "response": {"code": 0, "msg": "ok"}
 }
@@ -338,6 +340,7 @@ flags 缺失且没有任何 syscall 佐证时兜底为 `read`。
 网络判定按端点逐条处理。两类端点不参与判定：`network.ignored_endpoints`（只有 `127.0.0.1:15100`、`localhost:15100`，工具去平台拉线上配置走的本地回环），以及 `system_baseline` 里声明的本机系统端点（nscd / sssd / systemd-userdb 的 Unix socket）。`::1:15100`、`8.152.192.7:15100` 等其他地址一律照常判定。
 
 - 能通过 `connect` 关联到端点的 send/recv：端点被排除就不计入，否则计入。
+- connect 即信号（2026-10-26 起）：到非豁免端点、且 IR 未授权的 `connect` 本身计入网络动作——外联意图是内核侧事实，即使后续收发未被捕获也可判定（回放修复了 12 个"只捕获 connect 无收发"的漏报）。IR 已按端点（identifier 精确匹配）或按动作（`network_actions` 含 `connect`）授权的连接不计入。LSM 层 `socket_connect` 事件不带目标地址，connect 证据只取 syscall 流。
 - 无法关联端点的动作（LSM 层 `socket_sendmsg`/`recvmsg` 不带地址，`fd` 恒为 0）：本轮所有可识别端点都被排除时，视为发生在这些端点上，整轮网络按正常处理；只要出现一个未排除端点，或一个端点都识别不出来，就保守计入。
 
 ### 5.5 系统基线折叠

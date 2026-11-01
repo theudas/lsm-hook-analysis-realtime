@@ -177,8 +177,9 @@ class PerEndpointNetworkTest(unittest.TestCase):
             ],
         )
         self.assertFalse(observed["suppressed"])
-        self.assertEqual(observed["actions"], {"receive"})
-        self.assertEqual(observed["observed_actions"], {"send", "receive"})
+        # connect 即信号：到 8.8.8.8:53 的 connect 本身也计入；忽略端点上的不计入。
+        self.assertEqual(observed["actions"], {"connect", "receive"})
+        self.assertEqual(observed["observed_actions"], {"send", "receive", "connect"})
         self.assertEqual(observed["endpoints"], {"8.8.8.8:53"})
 
     def test_unattributed_actions_still_count_when_another_endpoint_exists(self) -> None:
@@ -187,7 +188,7 @@ class PerEndpointNetworkTest(unittest.TestCase):
             [lsm_hook("h-5", "socket_sendmsg")],
             [connect("c-1", 4, 1, remote_ip="8.152.192.7", remote_port="15100")],
         )
-        self.assertEqual(observed["actions"], {"send"})
+        self.assertEqual(observed["actions"], {"send", "connect"})
         self.assertEqual(observed["endpoints"], {"8.152.192.7:15100"})
 
 

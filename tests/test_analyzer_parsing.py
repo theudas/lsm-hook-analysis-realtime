@@ -354,7 +354,8 @@ class ParseNetworkActivityTest(unittest.TestCase):
         observed = analyzer.parse_network_activity([], syscalls)
         # send 发生在 t=20：应关联 t=10 的连接，而不是之后 t=30 的那次。
         self.assertIn("1.1.1.1:80", observed["all_endpoints"])
-        self.assertEqual(observed["observed_actions"], {"send"})
+        # connect 即信号：两次 connect 都指向非豁免端点，connect 本身计入动作。
+        self.assertEqual(observed["observed_actions"], {"send", "connect"})
 
     def test_send_before_any_connect_falls_back_to_first_record(self) -> None:
         """收发早于所有 connect 记录时回退到第一条连接。"""
@@ -370,7 +371,7 @@ class ParseNetworkActivityTest(unittest.TestCase):
             {"action": "recvfrom", "event_id": 2, "pid": 1, "fd": 3, "timestamp_mono_ns": 1},
         ]
         observed = analyzer.parse_network_activity([], syscalls)
-        self.assertEqual(observed["observed_actions"], {"receive"})
+        self.assertEqual(observed["observed_actions"], {"receive", "connect"})
         self.assertIn("9.9.9.9:53", observed["all_endpoints"])
 
     def test_unknown_fd_send_records_action_without_endpoint(self) -> None:
@@ -401,6 +402,75 @@ class ParseNetworkActivityTest(unittest.TestCase):
         observed = analyzer.parse_network_activity([], [])
         self.assertFalse(observed["suppressed"])
         self.assertEqual(observed["actions"], set())
+
+    def test_connect_to_non_exempt_endpoint_counts_as_action(self) -> None:
+        """connect 即信号：向非豁免端点发起连接本身计入网络动作，无需收发佐证。"""
+        observed = analyzer.parse_network_activity(
+            [],
+            [
+                {"action": "connect", "event_id": 1, "pid": 1, "fd": 3, "timestamp_mono_ns": 1,
+                 "args": {"remote_ip": "8.152.192.7", "remote_port": "15100", "sockfd": 3}},
+            ],
+        )
+        self.assertEqual(observed["actions"], {"connect"})
+        self.assertEqual(observed["endpoints"], {"8.152.192.7:15100"})
+
+    def test_connect_to_ignored_endpoint_is_not_counted(self) -> None:
+        """连接仅落在忽略端点（拉取线上配置）时 connect 不计入，整轮抑制照旧。"""
+        observed = analyzer.parse_network_activity(
+            [],
+            [
+                {"action": "connect", "event_id": 1, "pid": 1, "fd": 3, "timestamp_mono_ns": 1,
+                 "args": {"remote_ip": "127.0.0.1", "remote_port": "15100", "sockfd": 3}},
+            ],
+        )
+        self.assertEqual(observed["actions"], set())
+        self.assertTrue(observed["suppressed"])
+
+    def test_connect_to_baseline_endpoint_is_not_counted(self) -> None:
+        """连接系统基线端点（nscd）不触发 connect 信号。"""
+        observed = analyzer.parse_network_activity(
+            [],
+            [
+                {"action": "connect", "event_id": 1, "pid": 1, "fd": 3, "timestamp_mono_ns": 1,
+                 "args": {"sun_path": "/run/nscd/socket", "sockfd": 3}},
+            ],
+        )
+        self.assertEqual(observed["actions"], set())
+
+    def test_connect_to_ir_allowed_endpoint_is_not_counted(self) -> None:
+        """IR 已按端点授权（identifier 精确匹配）的连接不计入判定。"""
+        observed = analyzer.parse_network_activity(
+            [],
+            [
+                {"action": "connect", "event_id": 1, "pid": 1, "fd": 3, "timestamp_mono_ns": 1,
+                 "args": {"remote_ip": "127.0.0.1", "remote_port": "9", "sockfd": 3}},
+            ],
+            allowed_networks={"127.0.0.1:9"},
+        )
+        self.assertEqual(observed["actions"], set())
+        self.assertEqual(observed["observed_actions"], {"connect"})
+
+    def test_connect_allowed_by_ir_action_is_not_counted(self) -> None:
+        """IR 的 network_actions 显式允许 connect 时不计入。"""
+        observed = analyzer.parse_network_activity(
+            [],
+            [
+                {"action": "connect", "event_id": 1, "pid": 1, "fd": 3, "timestamp_mono_ns": 1,
+                 "args": {"remote_ip": "8.8.8.8", "remote_port": "53", "sockfd": 3}},
+            ],
+            allowed_network_actions={"connect", "send"},
+        )
+        self.assertEqual(observed["actions"], set())
+
+    def test_lsm_socket_connect_without_target_does_not_count(self) -> None:
+        """LSM 层 socket_connect 不带目标地址：不得产生无归因的 connect 动作。"""
+        observed = analyzer.parse_network_activity(
+            [{"hook_name": "socket_connect", "args": None, "timestamp_mono_ns": 1}],
+            [],
+        )
+        self.assertEqual(observed["actions"], set())
+        self.assertEqual(observed["observed_actions"], set())
 
     def test_connect_without_a_resolvable_target_contributes_no_endpoint(self) -> None:
         # 既没有 remote_ip 也没有 sun_path：连接记录在案但端点为 None，不得进入端点集合。

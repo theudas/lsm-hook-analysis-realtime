@@ -227,6 +227,47 @@ class AnalyzerActionMismatchTest(unittest.TestCase):
         self.assertEqual(mismatch["allowed"], ["send"])
         self.assertEqual(mismatch["extra"], ["receive"])
 
+    def test_connect_to_foreign_endpoint_alone_marks_round_anomalous(self) -> None:
+        """connect 即信号：仅向非豁免端点发起连接（无任何收发）也判网络异常。"""
+        self.write_round(
+            ir={"policies": []},
+            lsm=[],
+            syscalls=[
+                {"action": "connect", "event_id": "sc-connect", "pid": 1000, "fd": 3,
+                 "timestamp_mono_ns": 1,
+                 "args": {"remote_ip": "8.152.192.7", "remote_port": "15100", "sockfd": 3}},
+            ],
+        )
+        result = analyze_round(self.round_dir)
+        self.assertTrue(result["is_anomaly"])
+        mismatch = next(item for item in result["anomaly_types"] if item["type"] == "网络访问出现未授权动作")
+        self.assertEqual(mismatch["extra"], ["connect"])
+        self.assertEqual(mismatch["endpoints"], ["8.152.192.7:15100"])
+
+    def test_connect_to_ir_allowed_endpoint_is_not_anomalous(self) -> None:
+        """IR 按端点授权的连接（允许该端点收发）不触发 connect 信号。"""
+        ir = {
+            "policies": [
+                {
+                    "effect": "allow",
+                    "objects": [
+                        {"type": "network", "identifier": "127.0.0.1:9", "actions": ["send", "receive"]},
+                    ],
+                }
+            ]
+        }
+        self.write_round(
+            ir=ir,
+            lsm=[],
+            syscalls=[
+                {"action": "connect", "event_id": "sc-connect", "pid": 1000, "fd": 3,
+                 "timestamp_mono_ns": 1,
+                 "args": {"remote_ip": "127.0.0.1", "remote_port": "9", "sockfd": 3}},
+            ],
+        )
+        result = analyze_round(self.round_dir)
+        self.assertFalse(result["is_anomaly"])
+
     def test_localhost_15100_only_network_is_not_anomalous(self) -> None:
         # 工具去平台拉取线上配置：连接仅落在 127.0.0.1:15100，整轮网络按正常处理。
         ir = {"policies": []}
@@ -359,7 +400,8 @@ class AnalyzerActionMismatchTest(unittest.TestCase):
 
         self.assertFalse(result["network_suppressed"])
         self.assertEqual(result["network_endpoints"], ["::1:15100"])
-        self.assertEqual(result["network_observed"], ["receive", "send"])
+        # connect 即信号：::1:15100 非豁免端点，connect 本身也计入。
+        self.assertEqual(result["network_observed"], ["connect", "receive", "send"])
         self.assertTrue(result["is_anomaly"])
 
     def test_mixed_localhost_and_external_endpoint_still_flags_external(self) -> None:
