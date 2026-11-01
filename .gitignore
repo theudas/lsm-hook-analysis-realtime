@@ -15,4 +15,4 @@ reports/
 htmlcov/
 .DS_Store
 tests.zip
-.claude/
+.claude/settings.local.json
