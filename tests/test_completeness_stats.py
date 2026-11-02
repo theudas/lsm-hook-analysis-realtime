@@ -233,7 +233,9 @@ class RenderTest(unittest.TestCase):
         page = out.read_text(encoding="utf-8")
         self.assertIn('"rounds":[["complete-round"', page)
         self.assertIn("half-round", page)
-        self.assertIn('id="refresh"', page)
+        self.assertNotIn('id="refresh"', page)
+        # 纯静态产物：页面里没有任何刷新按钮或 fetch 调用，不依赖本地服务。
+        self.assertNotIn("fetch(", page)
         self.assertNotIn("/*__DATA__*/null", page)
         # 页面不携带部署机器的绝对路径：语料目录只允许以相对路径出现
         # （前面是 "." 的属于 ../../.. 形式的相对路径，不算泄漏）。

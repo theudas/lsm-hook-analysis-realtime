@@ -66,10 +66,6 @@ main { max-width: 1280px; margin: 0 auto; padding: 24px 16px 64px; }
 header { display: flex; flex-wrap: wrap; gap: 12px; justify-content: space-between; align-items: flex-start; }
 header h1 { font-size: 22px; margin: 0 0 4px; }
 .meta { color: var(--text-muted); font-size: 12px; overflow-wrap: anywhere; }
-.refresh { display: flex; align-items: center; gap: 10px; }
-.refresh button { font-size: 14px; padding: 6px 16px; background: var(--accent); color: #fff; border-color: transparent; }
-.refresh button:disabled { opacity: .55; cursor: default; }
-#refresh-status { color: var(--text-secondary); font-size: 12px; max-width: 360px; }
 .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 16px 0 0; font-size: 13px; }
 .controls .preset { padding: 4px 12px; }
 .controls .preset.active { background: var(--accent); color: #fff; border-color: transparent; }
@@ -443,30 +439,6 @@ function attachTooltip(view) {
   });
 }
 attachTooltip(computeView(fullT0, fullT1, null));
-
-// —— serve 模式下的刷新（静态文件里禁用） ——
-var refresh = document.getElementById("refresh");
-var statusEl = document.getElementById("refresh-status");
-if (location.protocol === "file:") {
-  refresh.disabled = true;
-  statusEl.textContent = "当前是静态文件，刷新需用 python3 scripts/completeness_stats.py --serve 打开";
-} else {
-  refresh.addEventListener("click", function () {
-    refresh.disabled = true;
-    statusEl.textContent = "正在重新统计 input/ 下最新的 round…";
-    fetch("refresh", { method: "POST" })
-      .then(function (resp) { return resp.json().catch(function () { return { ok: false, message: "HTTP " + resp.status }; }); })
-      .then(function (result) {
-        if (result.ok) { location.reload(); return; }
-        refresh.disabled = false;
-        statusEl.textContent = "刷新失败：" + (result.message || result.error || "未知错误");
-      })
-      .catch(function (err) {
-        refresh.disabled = false;
-        statusEl.textContent = "刷新失败：" + err;
-      });
-  });
-}
 </script>
 </body>
 </html>

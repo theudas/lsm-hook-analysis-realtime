@@ -13,7 +13,7 @@ description: 配置 lha_realtime/detection_rules.yaml（敏感分组、系统基
 - 加载时机：`lha_realtime/rules.py` 在 **import 时**加载一次。改完 YAML 需重启服务生效：
   `sudo systemctl restart lha_realtime.service`（本地调试则重启 receiver）。
 - 回退行为：文件缺失或某个键为空时，回退 `rules.py` 里的内置默认值（服务不会起不来，但会**静默**丢失你的修改——改完务必按验证流程确认规则真的生效了）。
-- `scripts/hotspot_stats.py --serve` 的页面"刷新"在子进程里重读规则，可即时复核豁免效果。
+- `scripts/hotspot_stats.py` 每次运行都重读规则，重新运行即可复核豁免效果（产物是静态 HTML，浏览器直接打开）。
 
 ## 顶层结构
 
@@ -82,7 +82,7 @@ files:
 
 **加一个敏感分组**：按字段表写全（reason/basis 必填，出处用 ATT&CK/Falco/Neo23x0 auditd/CIS），先在 `reports/信号归因与对抗评测.md` 的 B 变体逻辑下想清楚误报面。
 
-**加一条基线折叠**：条件尽量收窄（hooks+categories+prefixes 组合），跑 `scripts/hotspot_stats.py --serve` 看豁免建议页给的三档判定（建议豁免/需人工确认/不建议）与现成 YAML 片段。
+**加一条基线折叠**：条件尽量收窄（hooks+categories+prefixes 组合），跑 `scripts/hotspot_stats.py` 看豁免建议页给的三档判定（建议豁免/需人工确认/不建议）与现成 YAML 片段。
 
 **收窄某个组**：优先用精确 glob 替换前缀，参照坑清单里 `/etc/environment` 的先例。
 
@@ -94,7 +94,7 @@ python3 scripts/eval_metrics.py --tag <改动标签>  # 2. 240 round 回放：FP
 python3 scripts/signal_attribution.py            # 3. 对抗评测：A2 强伪装召回不得显著回退（现基线约 88.24%，回退 >2pp 视为退化）
 ```
 
-4. 需要人工复核豁免效果时：`python3 scripts/hotspot_stats.py --serve`，页面刷新即重读新规则。
+4. 需要人工复核豁免效果时：`python3 scripts/hotspot_stats.py`，重新运行即重读新规则。
 回放产物在 `reports/eval_artifacts_<标签>/`；判定翻转必须逐 round 核对归因（是消除误杀还是丢真阳性）。
 
 ## 红线与已踩过的坑

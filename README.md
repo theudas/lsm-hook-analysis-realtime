@@ -193,18 +193,16 @@ sudo systemctl reset-failed lha_realtime.service
 用来及时发现可以加入豁免的高频内核行为（在项目根目录执行）：
 
 ```bash
-python3 scripts/hotspot_stats.py --serve   # 打开 http://127.0.0.1:8765/ ，页面上的“刷新”按钮按需重新统计
-python3 scripts/hotspot_stats.py           # 只生成静态文件 reports/hotspot.html
+python3 scripts/hotspot_stats.py           # 生成静态文件 reports/hotspot.html，浏览器直接打开
 ```
 
 - 只看内核侧事实（hook、读写动作、路径、端点），不看工具调用与 IR。已被 `system_baseline` / 忽略端点豁免的操作先排除。
 - “豁免建议”列出出现在 ≥ 20% round（`--threshold` 可调）的行为，逐项给出 建议豁免 / 需人工确认 / 不建议 及依据；
-  前两档附可展开的 YAML 片段，确认后合入 `detection_rules.yaml`，再点“刷新”即可看到它被折叠。
+  前两档附可展开的 YAML 片段，确认后合入 `detection_rules.yaml`，重新运行脚本即可看到它被折叠。
 - 判定口径：敏感命中、观测到写入/创建/删除、位于 `/tmp`、`/home`、`/root` 等用户可写目录 → 不建议；
   含 `bprm_check`、未归为 runtime、本机 Unix socket 或回环端点 → 需人工确认；系统目录下的只读 runtime 行为、写终端/空设备 → 建议。
   非本机网络地址不给配置，是否放行由人决定。
-- 刷新在子进程里进行，每次都会读到最新的规则文件和 `input/` 下新到的 round。`--serve` 默认只监听本机，
-  需要远程查看时用 `--host 0.0.0.0`（页面含路径信息，注意访问控制）。
+- 每次运行都会读最新的规则文件和 `input/` 下新到的 round；要看最新数据就重新运行脚本。
 
 ## 7.2 看门狗：收不齐 round 的告警与归档
 
@@ -228,15 +226,14 @@ python3 scripts/hotspot_stats.py           # 只生成静态文件 reports/hotsp
 按时间维度盘点收齐 / 收不齐的比例，把“上游采集不完整”从事后盘点提前到随时可看（在项目根目录执行）：
 
 ```bash
-python3 scripts/completeness_stats.py --serve   # 打开 http://127.0.0.1:8766/ ，页面上的“刷新”按钮按需重新统计
-python3 scripts/completeness_stats.py           # 只生成静态文件 reports/completeness.html
+python3 scripts/completeness_stats.py           # 生成静态文件 reports/completeness.html，浏览器直接打开
 ```
 
 - 与看门狗共用同一套“收齐”口径（五类文件 + 可用 IR），看板、归档、就绪门控三者的判定不漂移。
 - 时间范围可选预设（近 1 小时 / 1 天 / 7 天 / 30 天）或自定义起止；分桶粒度按跨度自动选（小时 / 天 / 周）。
 - 主图按时间桶展示收齐（灰）与收不齐（红）的数量对比，悬停可看每桶明细；下方给缺失模式排行
   （缺 `round_end`、缺内核数据文件等）与收不齐的 round 示例（最新在前，含缺失清单与等待时长）。
-- 扫描在 `--serve` 模式下按需触发，默认只监听本机；远程查看用 `--host 0.0.0.0`（注意访问控制）。
+- 要看最新数据就重新运行脚本；产物是自包含 HTML，浏览器直接打开即可。
 
 ## 8. 运行测试
 
@@ -321,11 +318,11 @@ lsm-hook-analysis-realtime/
 ├── scripts/
 │   ├── bench_replay.py              # 全量语料回放性能基准（单 round 耗时分布、吞吐与语料统计）
 │   ├── collect_case_evidence.py    # 逐条采集测试报告用例的执行证据
-│   ├── completeness_stats.py        # 采集完整度看板（收齐比例、缺失模式、示例，--serve 支持页面内刷新）
+│   ├── completeness_stats.py        # 采集完整度看板（收齐比例、缺失模式、示例，生成静态 HTML）
 │   ├── completeness_template.html   # 看板页面模板
 │   ├── eval_metrics.py              # GT 标注回放评测：四指标与相对基线的翻转明细
 │   ├── gen_testcases.py            # 生成 tests/TEST_CASES.md
-│   ├── hotspot_stats.py            # 语料重放 → 内核行为豁免建议页面（--serve 支持页面内刷新）
+│   ├── hotspot_stats.py            # 语料重放 → 内核行为豁免建议页面（生成静态 HTML）
 │   ├── hotspot_template.html       # 页面模板
 │   ├── loadtest.py                  # 负载测试：真实 ingest/分析 worker 并发压测（不经 Socket.IO）
 │   ├── prune_invalid_rounds.py     # 把 input/ 下无法完整分析的 round 移到归档目录

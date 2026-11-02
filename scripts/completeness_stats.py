@@ -8,11 +8,10 @@ round_end / round_kernel + 两份内核 JSONL / ir）齐全才算收齐；ir 允
 
 产出一个自包含 HTML：不依赖 JavaScript 也能完整看到全时间范围的结论；打开
 JavaScript 后可按时间范围筛选（时间桶粒度自动选择，可手动切换），图、表、
-统计卡片全部随所选范围联动。
+统计卡片全部随所选范围联动。要看最新数据就重新运行脚本，再用浏览器打开产物。
 
 用法（在项目根目录执行）：
-  python3 scripts/completeness_stats.py            # 生成 reports/completeness.html
-  python3 scripts/completeness_stats.py --serve    # 启动本地页面，页面上的“刷新”按钮会重新统计
+  python3 scripts/completeness_stats.py            # 生成 reports/completeness.html，浏览器直接打开
 """
 
 from __future__ import annotations
@@ -24,12 +23,9 @@ import json
 import logging
 import math
 import os
-import subprocess
 import sys
-import threading
 import time
 from datetime import datetime
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -382,8 +378,6 @@ def render(records: list[dict], input_dir: Path, out: Path, examples_limit: int)
         '<header><div><h1>采集完整度</h1>',
         f'<div class="meta">生成于 <span id="generated">{esc(datetime.now().isoformat(timespec="seconds"))}</span>'
         f' · 语料 {esc(rel(input_dir))} · 收齐口径与分析和看门狗一致（六类输入齐全）</div></div>',
-        '<div class="refresh js-only"><button type="button" id="refresh">刷新</button>'
-        '<span id="refresh-status" role="status"></span></div>',
         '<noscript><div class="meta">筛选时间范围需开启 JavaScript；当前显示全时间范围。</div></noscript>',
         "</header>",
         controls_html(),
@@ -418,74 +412,14 @@ def generate(args) -> int:
     return 0
 
 
-def serve(args) -> int:
-    """本地页面服务：GET / 返回最新 HTML，POST /refresh 在子进程里重新统计。"""
-
-    child = [sys.executable, str(Path(__file__).resolve()), "--input-dir", str(args.input_dir),
-             "--out", str(args.out), "--examples", str(args.examples)]
-    lock = threading.Lock()
-
-    def regenerate() -> tuple[bool, str]:
-        with lock:
-            proc = subprocess.run(child, capture_output=True, text=True)
-        lines = (proc.stdout if proc.returncode == 0 else proc.stderr).strip().splitlines()
-        return proc.returncode == 0, lines[-1] if lines else ""
-
-    class Handler(BaseHTTPRequestHandler):
-        def reply(self, status: int, body: bytes, content_type: str) -> None:
-            self.send_response(status)
-            self.send_header("Content-Type", content_type)
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-
-        def do_GET(self) -> None:
-            if self.path.split("?", 1)[0] not in ("/", "/completeness.html") or not args.out.is_file():
-                self.reply(404, b"not found", "text/plain; charset=utf-8")
-                return
-            self.reply(200, args.out.read_bytes(), "text/html; charset=utf-8")
-
-        def do_POST(self) -> None:
-            if self.path != "/refresh":
-                self.reply(404, b"not found", "text/plain; charset=utf-8")
-                return
-            # 只接受本页面发起的刷新，避免其他网页跨站触发重算。
-            origin = self.headers.get("Origin")
-            if origin and origin.split("://", 1)[-1] != self.headers.get("Host"):
-                self.reply(403, b'{"ok": false, "error": "cross-origin refresh rejected"}', "application/json")
-                return
-            ok, message = regenerate()
-            body = json.dumps({"ok": ok, "message": message}, ensure_ascii=False).encode("utf-8")
-            self.reply(200 if ok else 500, body, "application/json; charset=utf-8")
-
-        def log_message(self, fmt: str, *values) -> None:
-            print(f"[completeness] {self.address_string()} {fmt % values}")
-
-    ok, message = regenerate()
-    print(message)
-    if not ok:
-        return 1
-    server = ThreadingHTTPServer((args.host, args.port), Handler)
-    print(f"打开 http://{args.host}:{args.port}/ 查看；页面上的“刷新”按钮会重新统计。Ctrl+C 退出。")
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    return 0
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--input-dir", type=Path, default=PROJECT_ROOT / "input")
     parser.add_argument("--out", type=Path, default=PROJECT_ROOT / "reports" / "completeness.html")
     parser.add_argument("--examples", type=int, default=50, help="示例表最多列出的 round 数（默认 50）")
-    parser.add_argument("--serve", action="store_true", help="启动本地页面，支持页面内刷新")
-    parser.add_argument("--host", default="127.0.0.1", help="--serve 监听地址（默认只对本机开放）")
-    parser.add_argument("--port", type=int, default=8766, help="--serve 监听端口")
     args = parser.parse_args()
     logging.disable(logging.CRITICAL)  # 扫描上万个 round，逐条日志只会刷屏
-    return serve(args) if args.serve else generate(args)
+    return generate(args)
 
 
 if __name__ == "__main__":

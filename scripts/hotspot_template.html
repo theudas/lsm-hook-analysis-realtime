@@ -65,10 +65,6 @@ main { max-width: 1280px; margin: 0 auto; padding: 24px 16px 64px; }
 header { display: flex; flex-wrap: wrap; gap: 12px; justify-content: space-between; align-items: flex-start; }
 header h1 { font-size: 22px; margin: 0 0 4px; }
 .meta { color: var(--text-muted); font-size: 12px; overflow-wrap: anywhere; }
-.refresh { display: flex; align-items: center; gap: 10px; }
-.refresh button { font-size: 14px; padding: 6px 16px; background: var(--accent); color: #fff; border-color: transparent; }
-.refresh button:disabled { opacity: .55; cursor: default; }
-#refresh-status { color: var(--text-secondary); font-size: 12px; max-width: 360px; }
 .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin: 20px 0; }
 .tile { background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; }
 .tile .label { color: var(--text-secondary); font-size: 12px; }
@@ -132,29 +128,6 @@ html.js .js-only { display: inline-flex !important; }
 <script>
 // 只做增强：没有脚本时页面照样完整显示。
 document.documentElement.classList.add("js");
-
-var refresh = document.getElementById("refresh");
-var statusEl = document.getElementById("refresh-status");
-if (location.protocol === "file:") {
-  refresh.disabled = true;
-  statusEl.textContent = "当前是静态文件，刷新需用 python3 scripts/hotspot_stats.py --serve 打开";
-} else {
-  refresh.addEventListener("click", function () {
-    refresh.disabled = true;
-    statusEl.textContent = "正在用最新规则和语料重新统计…";
-    fetch("refresh", { method: "POST" })
-      .then(function (resp) { return resp.json().catch(function () { return { ok: false, message: "HTTP " + resp.status }; }); })
-      .then(function (result) {
-        if (result.ok) { location.reload(); return; }
-        refresh.disabled = false;
-        statusEl.textContent = "刷新失败：" + (result.message || result.error || "未知错误");
-      })
-      .catch(function (err) {
-        refresh.disabled = false;
-        statusEl.textContent = "刷新失败：" + err;
-      });
-  });
-}
 
 document.querySelectorAll("button.copy").forEach(function (btn) {
   btn.addEventListener("click", function () {

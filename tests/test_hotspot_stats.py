@@ -123,7 +123,9 @@ class RenderTest(unittest.TestCase):
             page = out.read_text(encoding="utf-8")
         self.assertIn("/etc/hosts", page)
         self.assertIn("✓ 建议豁免", page)
-        self.assertIn('id="refresh"', page)
+        # 纯静态产物：页面里没有任何刷新按钮或 fetch 调用，不依赖本地服务。
+        self.assertNotIn('id="refresh"', page)
+        self.assertNotIn("fetch(", page)
         # 页面元信息只写相对项目根目录的路径。
         self.assertNotIn(f"语料 {input_dir}", page)
         self.assertIn("语料 ../", page)

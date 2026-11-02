@@ -358,7 +358,7 @@ flags 缺失且没有任何 syscall 佐证时兜底为 `read`。
 | `runtime_mprotect` | 落在 runtime 的 `file_mprotect` | `/tmp` 等非 runtime 位置的 mprotect |
 | `pathless_file_hook` | 内核没给路径的 `file_permission` / `file_mprotect` | 带路径的同类 hook |
 
-硬约束：敏感命中永远不会被折叠；规则文件缺失时基线为空（宁可多报）；没有任何条件的条目会被丢弃并告警。用 `scripts/hotspot_stats.py --serve` 打开豁免建议页面：它只看内核侧事实，列出尚未豁免的高频行为并给出建议与 YAML 片段，合入规则后点页面上的“刷新”即可复核。
+硬约束：敏感命中永远不会被折叠；规则文件缺失时基线为空（宁可多报）；没有任何条件的条目会被丢弃并告警。运行 `scripts/hotspot_stats.py` 生成豁免建议页面（静态 HTML，浏览器直接打开）：它只看内核侧事实，列出尚未豁免的高频行为并给出建议与 YAML 片段，合入规则后重新运行脚本即可复核。
 
 ---
 
