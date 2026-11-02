@@ -114,15 +114,12 @@ class BaselineRuleLoadingTest(unittest.TestCase):
         self.assertFalse(is_baseline_endpoint("AF_INET 8.152.192.7:15100"))
 
     def test_ignored_endpoints_are_exactly_the_configured_set(self) -> None:
-        """忽略端点恰为配置声明的五项：配置拉取入口 ×2、平台外联通道、回环校准端口 ×2。"""
+        """忽略端点恰为配置声明的两项：127.0.0.1:15100 与 localhost:15100（端口完整匹配）。"""
         self.assertEqual(
             set(rules.IGNORED_NETWORK_ENDPOINTS),
             {
                 "127.0.0.1:15100",
                 "localhost:15100",
-                "8.152.192.7:18788",
-                "127.0.0.1:46661",
-                "127.0.0.1:46163",
             },
         )
 
@@ -181,6 +178,13 @@ class PerEndpointNetworkTest(unittest.TestCase):
         self.assertEqual(observed["actions"], {"connect", "receive"})
         self.assertEqual(observed["observed_actions"], {"send", "receive", "connect"})
         self.assertEqual(observed["endpoints"], {"8.8.8.8:53"})
+
+    def test_non_network_syscall_action_is_skipped(self) -> None:
+        """文件类 syscall（open）混在序列里时直接跳过，不进网络动作集合。"""
+        observed = parse_network_activity([], [io("open", "f-1", 3, 1)])
+        self.assertEqual(observed["observed_actions"], set())
+        self.assertEqual(observed["actions"], set())
+        self.assertFalse(observed["suppressed"])
 
     def test_unattributed_actions_still_count_when_another_endpoint_exists(self) -> None:
         """LSM 层 sendmsg 不带地址，出现未排除端点时必须保守计入。"""
