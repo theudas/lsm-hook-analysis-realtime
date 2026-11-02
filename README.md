@@ -25,6 +25,8 @@ Socket.IO push
 
 服务器部署建议直接使用一键脚本。两个脚本都会先删除已有的 `lha_realtime.service`，再重新部署并启动。
 
+一键脚本只适合默认服务器（`8.152.192.7:15100`）：unit 文件不读 `.env`，服务器地址完全依赖 `config.py` 的内置默认值；脚本还会把依赖装进系统 Python（不建 venv）。**换服务器部署不要用一键脚本**，走第 5 节手动部署（`.env` + `EnvironmentFile`），或按 `.claude/skills/deploy/SKILL.md` 的标准流程操作。
+
 ### 2.1 不上报 Mock Round
 
 默认模式：`is_mock=true` 的 round 会分析并生成报告，但不会上报。
@@ -116,7 +118,7 @@ nohup python3 receiver.py > logs/service.out 2>&1 &
 
 ### 5.1 写入 Service 文件
 
-systemd 要求 `WorkingDirectory` 和 `ExecStart` 用绝对路径，把下面的 `/path/to/lsm-hook-analysis-realtime` 替换成实际部署路径：
+systemd 要求 `WorkingDirectory` 和 `ExecStart` 用绝对路径，把下面的 `/path/to/lsm-hook-analysis-realtime` 替换成实际部署路径。`EnvironmentFile` 指向 `.env`（创建方式见 `.claude/skills/deploy/SKILL.md` 第 1.2 节，权限 600），第 6 节的环境变量都写在里面；测试阶段如需上报 `is_mock=true` 的 round，在 `.env` 里设 `LHA_PUSH_MOCK_REPORTS=1`：
 
 ```bash
 sudo tee /etc/systemd/system/lha_realtime.service >/dev/null <<'EOF'
@@ -129,17 +131,18 @@ Wants=network-online.target
 Type=simple
 User=root
 WorkingDirectory=/path/to/lsm-hook-analysis-realtime
-ExecStart=/usr/bin/python3 /path/to/lsm-hook-analysis-realtime/receiver.py
+EnvironmentFile=/path/to/lsm-hook-analysis-realtime/.env
+ExecStart=/path/to/lsm-hook-analysis-realtime/.venv/bin/python /path/to/lsm-hook-analysis-realtime/receiver.py
 Restart=always
 RestartSec=5
 Environment=PYTHONUNBUFFERED=1
-# 测试阶段如需上报 is_mock=true 的 round，可取消下一行注释。
-# Environment=LHA_PUSH_MOCK_REPORTS=1
 
 [Install]
 WantedBy=multi-user.target
 EOF
 ```
+
+`ExecStart` 用 venv 里的解释器：先按第 4 节装好依赖（`python3 -m venv .venv` + `.venv/bin/python -m pip install -r requirements.txt`）。机器上没有 venv、坚持用系统 Python 时，把 `ExecStart` 换回 `/usr/bin/python3`。
 
 ### 5.2 启动 Service
 
@@ -159,7 +162,7 @@ sudo systemctl reset-failed lha_realtime.service
 
 ## 6. 配置项
 
-常用环境变量：
+常用环境变量（systemd 部署经 unit 的 `EnvironmentFile` 读取 `.env`，前台运行用 `set -a; . ./.env; set +a`）：
 
 - `LHA_SERVER_URL`：Socket.IO 服务地址，默认 `ws://8.152.192.7:15100`
 - `LHA_SOCKETIO_PATH`：Socket.IO path，默认 `/wss`
@@ -263,7 +266,7 @@ python3 -m coverage html        # 输出到 reports/coverage/html/index.html
 统计口径写在 `.coveragerc` 里（`branch = True`，只统计 `lha_realtime` 包），
 不需要在命令行重复指定参数。
 
-当前基线：**419 个用例，语句覆盖 100%，分支覆盖 100%**。
+当前基线：**420 个用例，语句覆盖 100%，分支覆盖 100%**。
 
 ### 8.2 测试文件分工
 
@@ -288,7 +291,7 @@ python3 -m coverage html        # 输出到 reports/coverage/html/index.html
 
 ### 8.3 用例清单
 
-全部 419 个用例逐条列在 `tests/TEST_CASES.md`，按测试文件 → 测试类 → 用例编号组织，
+全部 420 个用例逐条列在 `tests/TEST_CASES.md`，按测试文件 → 测试类 → 用例编号组织，
 每条带验证点说明。该文件由测试源码解析生成，不手工维护；改动测试后重新生成：
 
 ```bash
@@ -316,13 +319,19 @@ lsm-hook-analysis-realtime/
 │   ├── state.py           # SQLite inbox、round state、analysis jobs
 │   └── watchdog.py        # 收不齐 round 的超时告警、过期归档与消息清理
 ├── scripts/
+│   ├── bench_replay.py              # 全量语料回放性能基准（单 round 耗时分布、吞吐与语料统计）
+│   ├── collect_case_evidence.py    # 逐条采集测试报告用例的执行证据
 │   ├── completeness_stats.py        # 采集完整度看板（收齐比例、缺失模式、示例，--serve 支持页面内刷新）
 │   ├── completeness_template.html   # 看板页面模板
+│   ├── eval_metrics.py              # GT 标注回放评测：四指标与相对基线的翻转明细
 │   ├── gen_testcases.py            # 生成 tests/TEST_CASES.md
 │   ├── hotspot_stats.py            # 语料重放 → 内核行为豁免建议页面（--serve 支持页面内刷新）
 │   ├── hotspot_template.html       # 页面模板
+│   ├── loadtest.py                  # 负载测试：真实 ingest/分析 worker 并发压测（不经 Socket.IO）
+│   ├── prune_invalid_rounds.py     # 把 input/ 下无法完整分析的 round 移到归档目录
 │   ├── redeploy_ignore_mock.sh
-│   └── redeploy_push_mock.sh
+│   ├── redeploy_push_mock.sh
+│   └── signal_attribution.py       # 信号归因与对抗评测（四层判据承重分析、伪装逃逸量化）
 ├── tests/
 │   ├── TEST_CASES.md               # 全部用例清单（自动生成）
 │   ├── test_realtime_pipeline.py   # 端到端链路与回归

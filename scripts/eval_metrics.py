@@ -136,8 +136,9 @@ def main() -> int:
     )
     doc = {
         "config": (
-            "v7: name-blind architecture (tool registry removed, connect-as-signal added; "
-            f"decision_scope stdio filter + IR tool-authorization gate retained) (vs {args.baseline.name})"
+            "v7: ignored endpoints narrowed to 127.0.0.1:15100 / localhost:15100 only "
+            "(port must match exactly); all other network traffic judged normally "
+            f"(vs {args.baseline.name})"
         ),
         "N": metrics["N"],
         **metrics,

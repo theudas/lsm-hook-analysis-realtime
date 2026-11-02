@@ -77,7 +77,7 @@ files:
 
 **加一个豁免端点**（如平台新组件的外联通道）：
 1. `network.ignored_endpoints` 追加 `"IP:端口"`，注释写回放依据（哪些 round、什么行为）。
-2. 同步改 `tests/test_rules_loading.py` 的 `test_ignored_endpoints_are_exactly_the_configured_set`（契约测试锁定集合内容）。
+2. 同步改 `tests/test_system_baseline.py` 的 `test_ignored_endpoints_are_exactly_the_configured_set`（契约测试锁定集合内容）。
 3. 跑回放对比：目标 round 判定翻转、TP 零损失。
 
 **加一个敏感分组**：按字段表写全（reason/basis 必填，出处用 ATT&CK/Falco/Neo23x0 auditd/CIS），先在 `reports/信号归因与对抗评测.md` 的 B 变体逻辑下想清楚误报面。
@@ -91,7 +91,7 @@ files:
 ```bash
 python3 -m unittest discover -s tests            # 1. 单测（含配置契约测试）
 python3 scripts/eval_metrics.py --tag <改动标签>  # 2. 240 round 回放：FPR/FNR/翻转明细
-python3 scripts/signal_attribution.py            # 3. 对抗评测：A2 强伪装召回不得显著回退（现基线约 87.65%，回退 >2pp 视为退化）
+python3 scripts/signal_attribution.py            # 3. 对抗评测：A2 强伪装召回不得显著回退（现基线约 88.24%，回退 >2pp 视为退化）
 ```
 
 4. 需要人工复核豁免效果时：`python3 scripts/hotspot_stats.py --serve`，页面刷新即重读新规则。
@@ -109,4 +109,5 @@ python3 scripts/signal_attribution.py            # 3. 对抗评测：A2 强伪�
 
 - v4（2026-10-19）：回放调参——加 `8.152.192.7:18788`、回环校准端口，新增 `systemd_private_socket` 基线；FPR 24.29%→17.14%。
 - v5（2026-10-19）：曾加 `tools.registered` 工具注册表（召回 92.94%）。
-- v6（2026-10-26）：移除 `tools.registered`（名字可被伪装绕过），检测转由"connect 即信号"等行为判据承重（analyzer 代码实现，详见 DESIGN.md v3）。当前基线：召回 88.82% / FPR 12.86% / A2 强伪装下 87.65%。
+- v6（2026-10-26）：移除 `tools.registered`（名字可被伪装绕过），检测转由"connect 即信号"等行为判据承重（analyzer 代码实现，详见 DESIGN.md v3）。该版基线：召回 88.82% / FPR 12.86% / A2 强伪装下 87.65%。
+- v7（2026-11-02）：忽略端点收窄为 `127.0.0.1:15100` / `localhost:15100` 两项（移除 `8.152.192.7:18788`、`127.0.0.1:46661`、`127.0.0.1:46163`），端口须完整匹配，其余网络请求一律正常判定。代价：FPR 12.86%→20.0%（5 个良性 exec round 命中被移除的端点）；收益：召回 88.82%→89.41%（+1 TP，工具劫持 round `2b6a4000`），相对 v6 零丢失检测；A2 强伪装 87.65%→88.24%（无回退）。当前基线：召回 89.41% / FPR 20.0% / A2 88.24%。

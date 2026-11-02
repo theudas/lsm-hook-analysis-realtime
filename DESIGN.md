@@ -1,6 +1,6 @@
 # LSM Hook 越权分析模块设计文档
 
-版本 3，2026-10-26。对应代码：`lha_realtime/`，规则文件 `lha_realtime/detection_rules.yaml`。v3 变更：移除工具注册表判据（静态名单可被起名绕过，见 `reports/信号归因与对抗评测.md`），新增 connect 即信号。
+版本 4，2026-11-02。对应代码：`lha_realtime/`，规则文件 `lha_realtime/detection_rules.yaml`。v4 变更：忽略端点收窄为 `127.0.0.1:15100` / `localhost:15100` 两项（端口须完整匹配，规则 v7），其余网络请求一律正常判定；基线折叠表补 `systemd_private_socket`，同步敏感分组数、测试数与 `file_permission` 消费现状。v3 变更：移除工具注册表判据（静态名单可被起名绕过，见 `reports/信号归因与对抗评测.md`），新增 connect 即信号。
 
 ---
 
@@ -339,7 +339,7 @@ flags 缺失且没有任何 syscall 佐证时兜底为 `read`。
 | 文件访问出现未授权动作 | 路径命中了 IR 允许集，但实际动作超出该 identifier 声明的动作集合 |
 | 网络访问出现未授权动作 | 观测到的网络动作超出 IR 声明的 `network_actions` |
 
-网络判定按端点逐条处理。两类端点不参与判定：`network.ignored_endpoints`（只有 `127.0.0.1:15100`、`localhost:15100`，工具去平台拉线上配置走的本地回环），以及 `system_baseline` 里声明的本机系统端点（nscd / sssd / systemd-userdb 的 Unix socket）。`::1:15100`、`8.152.192.7:15100` 等其他地址一律照常判定。
+网络判定按端点逐条处理。两类端点不参与判定：`network.ignored_endpoints`（只有 `127.0.0.1:15100`、`localhost:15100`，工具去平台拉线上配置走的本地回环；端点按 `IP:port` 字面整串匹配，同 IP 不同端口不算），以及 `system_baseline` 里声明的本机系统端点（nscd / sssd / systemd-userdb 的 Unix socket）。`::1:15100`、`8.152.192.7:15100` 等其他地址一律照常判定。2026-11-02 起收窄为此两项（规则 v7）：此前曾豁免过的平台外联通道 `8.152.192.7:18788` 与回环校准端口 `127.0.0.1:46661`、`127.0.0.1:46163` 已移除，涉及这些端点的请求交由判定逻辑正常处理。
 
 - 能通过 `connect` 关联到端点的 send/recv：端点被排除就不计入，否则计入。
 - connect 即信号（2026-10-26 起）：到非豁免端点、且 IR 未授权的 `connect` 本身计入网络动作——外联意图是内核侧事实，即使后续收发未被捕获也可判定（回放修复了 12 个"只捕获 connect 无收发"的漏报）。IR 已按端点（identifier 精确匹配）或按动作（`network_actions` 含 `connect`）授权的连接不计入。LSM 层 `socket_connect` 事件不带目标地址，connect 证据只取 syscall 流。
@@ -351,7 +351,8 @@ flags 缺失且没有任何 syscall 佐证时兜底为 `read`。
 
 | 规则 | 屏蔽什么 | 不屏蔽什么 |
 |---|---|---|
-| `nss_unix_socket` | 连接 nscd / sssd / userdb 的 Unix socket | `/run/systemd/private` 等其他本机 socket |
+| `nss_unix_socket` | 连接 nscd / sssd / userdb 的 Unix socket | 未声明的其他本机 socket |
+| `systemd_private_socket` | 连接 systemd 管理器私有 socket（`/run/systemd/private`，ls / 读文件等命令的 systemd 查询前置） | 其他本机 Unix socket |
 | `netlink_socket` | `AF_NETLINK` 套接字操作 | `AF_INET` / `AF_INET6` / `AF_UNIX` |
 | `dynamic_loader_open` | runtime 目录下共享库、ld.so.cache、locale 的 `file_open` | `bprm_check`（执行了什么程序）、库目录写入 |
 | `runtime_mprotect` | 落在 runtime 的 `file_mprotect` | `/tmp` 等非 runtime 位置的 mprotect |
@@ -377,7 +378,7 @@ flags 缺失且没有任何 syscall 佐证时兜底为 `read`。
 | **Kubernetes 官方文档** | ServiceAccount 令牌默认投射到 `/var/run/secrets/kubernetes.io/serviceaccount/`，目录下有 `token`、`ca.crt`、`namespace` |
 | **容器逃逸公开分析** | `/var/run/docker.sock` 等价于宿主 root；cgroup `release_agent` 在 cgroup 变空时以宿主内核身份执行指定程序；`/proc/sys/kernel/core_pattern` 可触发宿主侧命令执行 |
 
-### 6.2 十三个敏感分组
+### 6.2 十五个敏感分组
 
 每组在 `detection_rules.yaml` 里带 `reason`（威胁语义）、`basis`（公开依据）、`attck`（技术编号）、`severity`、`match`（读就敏感还是写才敏感）。
 
@@ -660,7 +661,7 @@ IR 一条网络动作都没允许，命令本身也不含任何网络语义，`h
 
 ### 10.2 单元测试
 
-`tests/test_realtime_pipeline.py` 共 34 项，其中 9 项专门锁定敏感判定的取舍：
+`tests/test_realtime_pipeline.py` 共 37 项，其中 9 项专门锁定敏感判定的取舍：
 
 - `/proc/self` 自读判 runtime，跨进程判 sensitive
 - `/proc/*/stat`、`/proc/*/status` 跨进程也不判 sensitive
@@ -764,13 +765,13 @@ curl -s -X POST http://8.152.192.7:15100/api/webhook -H 'Content-Type: applicati
 |---|---|---|---|
 | `file_open` | 24541 | 主线，flags 映射动作，关联 syscall 算字节 | 已用满 |
 | `file_mprotect` | 5134 | 当作带路径的文件操作 | 内存保护属性变更，`W^X` 被破坏是代码注入信号 |
-| `file_permission` | 3532 | 全部没有 `path`，落进 `unknown` 分类 | 这 3532 条只贡献噪声，在报告里以"未知路径"整块出现 |
+| `file_permission` | 3532 | 无 `path` 的由 `pathless_file_hook` 折叠（§5.5），不进越权清单 | 仍无法关联到具体资源 |
 | `socket_*` | 5038 | 网络判定，`connect` 用于给收发标注端点 | 已用满 |
 | `bprm_check` | 467 | 当作对 `/usr/bin/bash` 之类的文件读取 | `args.argv`，见 12.1 |
 | `inode_unlink` | 53 | 映射成 `delete`，参与动作比对 | 已用满 |
 | `inode_rename` | 4 | 没有动作映射，只当路径出现 | `args.old_path` 与 `args.new_path` |
 
-`file_permission` 的 3532 条全部没有 `path`，进不了任何有意义的分类，只会把越权计数撑大。这是上游采集侧的问题，短期可以在模块侧跳过没有 `path` 的 `file_permission` 事件。
+`file_permission` 的 3532 条全部没有 `path`，进不了任何有意义的分类。模块侧的处理是 `pathless_file_hook` 折叠（见 §5.5）：这些事件不再进越权清单，只在报告末尾汇总一行，不再撑大计数。路径缺失本身仍是上游采集侧的问题，补上路径才能区分"读已打开的 fd"和"匿名映射"这两类来源。
 
 `inode_rename` 只有 4 条，都是 openclaw 自己的原子写。改名是 Tracee `ld_preload` signature 明确关注的动作之一（把一个 `.so` 改名成 `/etc/ld.so.preload`），规则已经覆盖了这条路径，动作映射还没跟上。
 
