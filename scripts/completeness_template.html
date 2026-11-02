@@ -1,0 +1,472 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
+<title>采集完整度</title>
+<style>
+:root {
+  color-scheme: light;
+  --surface-0: #f4f4f2;
+  --surface-1: #fcfcfb;
+  --surface-2: #efeeea;
+  --border: #e0dfd9;
+  --text-primary: #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted: #77766f;
+  --accent: #2a78d6;
+  /* 状态色固定不随主题变化，且总是配合图标与文字出现 */
+  --good: #0ca30c;
+  --warning: #fab219;
+  --critical: #d03b3b;
+  /* 收齐是背景量，用去强调灰；收不齐才是要看的东西 */
+  --bar-ok: #77766f;
+  --grid: #e1e0d9;
+  --axis: #c3c2b7;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --surface-0: #111110;
+    --surface-1: #1a1a19;
+    --surface-2: #242422;
+    --border: #34332f;
+    --text-primary: #f0efec;
+    --text-secondary: #c3c2b7;
+    --text-muted: #8f8e86;
+    --accent: #3987e5;
+    --bar-ok: #8f8e86;
+    --grid: #2c2c2a;
+    --axis: #383835;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --surface-0: #111110;
+  --surface-1: #1a1a19;
+  --surface-2: #242422;
+  --border: #34332f;
+  --text-primary: #f0efec;
+  --text-secondary: #c3c2b7;
+  --text-muted: #8f8e86;
+  --accent: #3987e5;
+  --bar-ok: #8f8e86;
+  --grid: #2c2c2a;
+  --axis: #383835;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--surface-0);
+  color: var(--text-primary);
+  font: 14px/1.5 -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+}
+main { max-width: 1280px; margin: 0 auto; padding: 24px 16px 64px; }
+header { display: flex; flex-wrap: wrap; gap: 12px; justify-content: space-between; align-items: flex-start; }
+header h1 { font-size: 22px; margin: 0 0 4px; }
+.meta { color: var(--text-muted); font-size: 12px; overflow-wrap: anywhere; }
+.refresh { display: flex; align-items: center; gap: 10px; }
+.refresh button { font-size: 14px; padding: 6px 16px; background: var(--accent); color: #fff; border-color: transparent; }
+.refresh button:disabled { opacity: .55; cursor: default; }
+#refresh-status { color: var(--text-secondary); font-size: 12px; max-width: 360px; }
+.controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 16px 0 0; font-size: 13px; }
+.controls .preset { padding: 4px 12px; }
+.controls .preset.active { background: var(--accent); color: #fff; border-color: transparent; }
+.controls .range { display: inline-flex; align-items: center; gap: 6px; color: var(--text-secondary); }
+.controls input, .controls select {
+  font: inherit; color: var(--text-primary); background: var(--surface-1);
+  border: 1px solid var(--border); border-radius: 4px; padding: 3px 6px;
+}
+.controls #range-caption { margin-left: auto; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin: 20px 0; }
+.tile { background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; }
+.tile .label { color: var(--text-secondary); font-size: 12px; }
+.tile .value { font-size: 24px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.tile .sub { color: var(--text-muted); font-size: 12px; overflow-wrap: anywhere; }
+section { background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-top: 16px; }
+section h2 { font-size: 16px; margin: 0 0 2px; }
+section .desc { color: var(--text-secondary); font-size: 13px; margin: 0 0 12px; }
+.legend { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); margin: 0 0 8px; }
+.legend .key { width: 14px; height: 10px; border-radius: 2px; display: inline-block; margin: 0 4px 0 12px; }
+.legend .key:first-child { margin-left: 0; }
+.legend .key.ok { background: var(--bar-ok); }
+.legend .key.bad { background: var(--critical); }
+.chart { border: 1px solid var(--border); border-radius: 6px; background: var(--surface-1); padding: 6px 2px 0; }
+.chart svg { display: block; width: 100%; height: auto; }
+.chart .grid { stroke: var(--grid); stroke-width: 1; }
+.chart .axis { stroke: var(--axis); stroke-width: 1; }
+.chart .tick { fill: var(--text-muted); font-size: 11px; font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; }
+.chart .bar-ok { fill: var(--bar-ok); }
+.chart .bar-bad { fill: var(--critical); }
+.chart .hit { fill: transparent; outline: none; cursor: default; }
+.chart .hit:hover, .chart .hit:focus { fill: rgba(127, 127, 127, 0.06); }
+.scroll { overflow-x: auto; max-width: 100%; }
+table.list { width: 100%; border-collapse: collapse; font-size: 13px; }
+table.list th, table.list td { text-align: left; padding: 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+table.list th { color: var(--text-secondary); font-weight: 500; white-space: nowrap; }
+table.list td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+table.list ul { margin: 0; padding-left: 18px; color: var(--text-secondary); }
+.sub, .examples { color: var(--text-muted); font-size: 12px; }
+code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+td code { overflow-wrap: anywhere; }
+details { margin-top: 6px; }
+details summary { cursor: pointer; color: var(--accent); }
+button { font: inherit; font-size: 12px; color: var(--text-primary); background: var(--surface-2);
+  border: 1px solid var(--border); border-radius: 4px; padding: 2px 8px; cursor: pointer; }
+.empty { color: var(--text-muted); }
+.js-only { display: none !important; }
+html.js .js-only { display: inline-flex !important; }
+#tip {
+  position: fixed; display: none; pointer-events: none; z-index: 10;
+  background: var(--surface-1); border: 1px solid var(--border); border-radius: 6px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18); padding: 8px 10px; font-size: 12px; max-width: 320px;
+}
+#tip .t { color: var(--text-muted); margin-bottom: 4px; }
+#tip .row { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+#tip .row .k { width: 10px; height: 8px; border-radius: 2px; display: inline-block; }
+#tip .row .k.ok { background: var(--bar-ok); }
+#tip .row .k.bad { background: var(--critical); }
+#tip .row b { font-variant-numeric: tabular-nums; font-weight: 600; }
+#tip .row span { color: var(--text-secondary); }
+</style>
+</head>
+<body>
+<main>
+<!--__BODY__-->
+</main>
+<div id="tip" role="tooltip"></div>
+<script>
+// 数据与服务端渲染的口径完全一致；没有脚本时页面照样完整显示全时间范围。
+var DATA = /*__DATA__*/null;
+var COMPLETE = 63, HOUR = 3600, DAY = 86400, WEEK = 7 * 86400, MAX_BUCKETS = 240;
+var CHART_W = 960, CHART_H = 240;
+
+document.documentElement.classList.add("js");
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, function (c) {
+    return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+  });
+}
+function pct(v) { return v > 0 && v < 0.001 ? (v * 100).toFixed(1) + "%" : Math.round(v * 100) + "%"; }
+function compact(v) { return v >= 1000 ? (v / 1000).toFixed(1) + "K" : String(v).toLocaleString(); }
+function missingFromMask(m) {
+  var items = [];
+  if (!(m & 1)) items.push("round_start");
+  if (!(m & 2)) items.push("round_end");
+  if (!(m & 4)) items.push("round_kernel");
+  else if (!((m & 8) && (m & 16))) items.push("内核数据文件");
+  if (!(m & 32)) items.push("ir");
+  return items;
+}
+function autoBucketSeconds(span) {
+  if (span <= 2 * DAY) return HOUR;
+  if (span <= 180 * DAY) return DAY;
+  return WEEK;
+}
+function bucketize(records, t0, t1, seconds) {
+  if (t1 < t0) t1 = t0;
+  while ((t1 - t0) / Math.max(seconds, 1) > MAX_BUCKETS) seconds *= 2;
+  var start = Math.floor(t0 / seconds) * seconds;
+  var spans = {};
+  records.forEach(function (r) {
+    if (r[1] < t0 || r[1] > t1) return;
+    var idx = Math.floor((r[1] - start) / seconds);
+    if (!spans[idx]) spans[idx] = [0, 0];
+    spans[idx][r[2] === COMPLETE ? 0 : 1] += 1;
+  });
+  var buckets = [];
+  for (var idx = 0; idx <= Math.floor((t1 - start) / seconds); idx++) {
+    var s = spans[idx] || [0, 0];
+    buckets.push({ start: start + idx * seconds, ok: s[0], bad: s[1] });
+  }
+  return { buckets: buckets, seconds: seconds };
+}
+function pad(n) { return n < 10 ? "0" + n : "" + n; }
+function bucketLabel(t, seconds) {
+  var d = new Date(t * 1000);
+  var day = d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate());
+  return seconds < DAY ? pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + " " + pad(d.getHours()) + ":00" : day;
+}
+function fmtTime(t) {
+  var d = new Date(t * 1000);
+  return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + " " +
+    pad(d.getHours()) + ":" + pad(d.getMinutes());
+}
+function fmtAge(seconds) {
+  if (seconds < 3600) return (seconds / 60).toFixed(0) + " 分钟";
+  if (seconds < 86400) return (seconds / 3600).toFixed(1) + " 小时";
+  return (seconds / 86400).toFixed(1) + " 天";
+}
+function niceCeiling(v) {
+  if (v <= 0) return 1;
+  var power = Math.pow(10, Math.floor(Math.log(v) / Math.LN10));
+  var steps = [1, 2, 5, 10];
+  for (var i = 0; i < steps.length; i++) if (steps[i] * power >= v) return steps[i] * power;
+  return power * 10;
+}
+function topRounded(x, y, w, h) {
+  var r = Math.min(4, w / 2, h);
+  return "M" + x + "," + (y + h) + " L" + x + "," + (y + r) + " Q" + x + "," + y + " " + (x + r) + "," + y +
+    " L" + (x + w - r) + "," + y + " Q" + (x + w) + "," + y + " " + (x + w) + "," + (y + r) +
+    " L" + (x + w) + "," + (y + h) + " Z";
+}
+function chartSvg(buckets, seconds) {
+  var left = 46, right = 8, top = 8, bottom = 24;
+  var plotW = CHART_W - left - right, plotH = CHART_H - top - bottom;
+  var ceiling = niceCeiling(Math.max.apply(null, buckets.map(function (b) { return b.ok + b.bad; }).concat([0])));
+  var n = Math.max(buckets.length, 1);
+  var slot = plotW / n, barW = Math.min(24, slot * 0.72);
+  function yOf(v) { return top + plotH * (1 - v / ceiling); }
+  var parts = ['<svg viewBox="0 0 ' + CHART_W + " " + CHART_H + '" role="img" aria-label="收齐与收不齐 round 数随时间变化">'];
+  for (var tick = 0; tick < 5; tick++) {
+    var value = ceiling * tick / 4, gy = yOf(value);
+    parts.push('<line class="grid" x1="' + left + '" y1="' + gy.toFixed(1) + '" x2="' + (CHART_W - right) +
+      '" y2="' + gy.toFixed(1) + '"/>');
+    parts.push('<text class="tick" x="' + (left - 6) + '" y="' + (gy + 4).toFixed(1) + '" text-anchor="end">' +
+      compact(Math.round(value)) + "</text>");
+  }
+  parts.push('<line class="axis" x1="' + left + '" y1="' + (top + plotH) + '" x2="' + (CHART_W - right) +
+    '" y2="' + (top + plotH) + '"/>');
+  var gap = 2, base = top + plotH;
+  buckets.forEach(function (b, idx) {
+    var bx = left + slot * idx + (slot - barW) / 2;
+    var okH = plotH * b.ok / ceiling, badH = plotH * b.bad / ceiling;
+    if (b.bad) parts.push('<path class="bar-bad" d="' + topRounded(bx, yOf(b.ok + b.bad), barW, badH) + '"/>');
+    if (b.ok) {
+      if (b.bad) parts.push('<rect class="bar-ok" x="' + bx.toFixed(1) + '" y="' + (base - okH + gap).toFixed(1) +
+        '" width="' + barW.toFixed(1) + '" height="' + Math.max(okH - gap, 0).toFixed(1) + '"/>');
+      else parts.push('<path class="bar-ok" d="' + topRounded(bx, base - okH, barW, okH) + '"/>');
+    }
+    var total = b.ok + b.bad;
+    var title = bucketLabel(b.start, seconds) + "：收齐 " + b.ok + "，收不齐 " + b.bad + "，共 " + total +
+      "，收齐率 " + (total ? pct(b.ok / total) : "-");
+    parts.push('<rect class="hit" data-i="' + idx + '" x="' + (left + slot * idx).toFixed(1) + '" y="' + top +
+      '" width="' + slot.toFixed(1) + '" height="' + plotH + '" tabindex="0"><title>' + esc(title) + "</title></rect>");
+  });
+  var shown = Math.min(n, 8);
+  for (var i = 0; i < shown; i++) {
+    var idx = shown > 1 ? Math.round(i * (n - 1) / (shown - 1)) : 0;
+    if (idx < 0 || idx >= n) continue;
+    var x = left + slot * idx + slot / 2;
+    parts.push('<text class="tick" x="' + x.toFixed(1) + '" y="' + (CHART_H - 6) + '" text-anchor="middle">' +
+      esc(bucketLabel(buckets[idx].start, seconds)) + "</text>");
+  }
+  parts.push("</svg>");
+  return parts.join("");
+}
+
+// —— 筛选与联动 ——
+var fullT0 = DATA.rounds.length ? Math.min.apply(null, DATA.rounds.map(function (r) { return r[1]; })) : DATA.now;
+var fullT1 = DATA.rounds.length ? Math.max.apply(null, DATA.rounds.map(function (r) { return r[1]; })) : DATA.now;
+var fromEl = document.getElementById("from");
+var toEl = document.getElementById("to");
+var bucketEl = document.getElementById("bucket");
+
+function toLocalInput(t) {
+  var d = new Date(t * 1000);
+  return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + "T" +
+    pad(d.getHours()) + ":" + pad(d.getMinutes());
+}
+function fromLocalInput(value) {
+  return value ? Math.floor(new Date(value).getTime() / 1000) : null;
+}
+
+function tilesHtml(view) {
+  var topMissing = view.patterns.length ? view.patterns[0].missing.join("、") : "-";
+  var topCount = view.patterns.length ? view.patterns[0].ids.length : 0;
+  var ratio = view.total ? view.ratio : 0;
+  return '<div class="tiles" id="tiles">' +
+    tile("round 总数", compact(view.total), "范围 " + ((view.t1 - view.t0) / 86400).toFixed(1) + " 天") +
+    tile("收齐", compact(view.ok), view.total ? pct(ratio) : "-") +
+    tile("收不齐", compact(view.bad), view.total ? pct(1 - ratio) : "-") +
+    tile("收齐率", view.total ? pct(ratio) : "-", "收不齐中最常见缺失：" + esc(topMissing) + "（" + compact(topCount) + "）") +
+    "</div>";
+  function tile(label, value, sub) {
+    return '<div class="tile"><div class="label">' + esc(label) + '</div><div class="value">' + esc(value) +
+      '</div><div class="sub">' + sub + "</div></div>";
+  }
+}
+function bucketTableHtml(view) {
+  var rows = "";
+  for (var i = view.buckets.length - 1; i >= 0; i--) {
+    var b = view.buckets[i], total = b.ok + b.bad;
+    rows += "<tr><td>" + esc(bucketLabel(b.start, view.seconds)) + '</td><td class="num">' + b.ok.toLocaleString() +
+      '</td><td class="num">' + b.bad.toLocaleString() + '</td><td class="num">' + total.toLocaleString() +
+      '</td><td class="num">' + (total ? pct(b.ok / total) : "-") + "</td></tr>";
+  }
+  return '<details><summary>按时间桶查看数据表</summary><div class="scroll"><table class="list">' +
+    "<thead><tr><th>时间桶</th><th>收齐</th><th>收不齐</th><th>合计</th><th>收齐率</th></tr></thead><tbody>" +
+    rows + "</tbody></table></div></details>";
+}
+function patternsHtml(view) {
+  if (!view.patterns.length) {
+    return '<p class="empty">所选范围内没有收不齐的 round。</p>';
+  }
+  var rows = "";
+  view.patterns.forEach(function (p) {
+    var sample = p.ids.slice(0, 3).map(function (id) { return "<code>" + esc(id) + "</code>"; }).join("、");
+    var more = "";
+    if (p.ids.length > 3) {
+      var items = p.ids.slice(0, 20).map(function (id) { return "<li><code>" + esc(id) + "</code></li>"; }).join("");
+      more = '<details><summary>共 ' + p.ids.length + " 个，展开前 20 个</summary><ul>" + items + "</ul></details>";
+    }
+    rows += "<tr><td>" + esc(p.missing.join("、")) + '</td><td class="num">' + p.count.toLocaleString() +
+      '</td><td class="num">' + (view.total ? pct(p.count / view.total) : "-") + '</td><td class="num">' +
+      (view.bad ? pct(p.count / view.bad) : "-") + "</td><td>" + sample + more + "</td></tr>";
+  });
+  return '<div class="scroll"><table class="list"><thead><tr><th>缺失</th><th>round 数</th><th>占全部</th>' +
+    "<th>占收不齐</th><th>round 示例</th></tr></thead><tbody>" + rows + "</tbody></table></div>";
+}
+function examplesHtml(view, inputDir) {
+  if (!view.examples.length) return '<p class="empty">所选范围内没有收不齐的 round。</p>';
+  var rows = "";
+  view.examples.forEach(function (r) {
+    rows += "<tr><td><code>" + esc(r[0]) + "</code></td><td>" + esc(fmtTime(r[1])) + '</td><td class="num">' +
+      esc(fmtAge(Math.max(DATA.now - r[1], 0))) + "</td><td>" + esc(missingFromMask(r[2]).join("、")) +
+      "</td><td><code>" + esc(inputDir + "/" + r[0]) + "</code></td></tr>";
+  });
+  return '<div class="scroll"><table class="list"><thead><tr><th>round_id</th><th>开始时间</th><th>等待</th>' +
+    "<th>缺失</th><th>目录</th></tr></thead><tbody>" + rows + "</tbody></table></div>";
+}
+
+function computeView(t0, t1, bucketSeconds) {
+  var inRange = DATA.rounds.filter(function (r) { return r[1] >= t0 && r[1] <= t1; });
+  var ok = 0;
+  inRange.forEach(function (r) { if (r[2] === COMPLETE) ok += 1; });
+  var byPattern = {};
+  inRange.forEach(function (r) {
+    if (r[2] === COMPLETE) return;
+    var key = missingFromMask(r[2]).join("、");
+    if (!byPattern[key]) byPattern[key] = { missing: missingFromMask(r[2]), ids: [] };
+    byPattern[key].ids.push(r[0]);
+  });
+  var patterns = Object.keys(byPattern).map(function (k) { return byPattern[k]; });
+  patterns.sort(function (a, b) { return b.ids.length - a.ids.length || (a.missing.join() < b.missing.join() ? -1 : 1); });
+  patterns.forEach(function (p) { p.count = p.ids.length; });
+  var bad = inRange.length - ok;
+  var bucketed = bucketize(inRange, t0, t1, bucketSeconds || autoBucketSeconds(t1 - t0));
+  var examples = inRange.filter(function (r) { return r[2] !== COMPLETE; })
+    .sort(function (a, b) { return b[1] - a[1]; }).slice(0, 50);
+  return {
+    total: inRange.length, ok: ok, bad: bad,
+    ratio: inRange.length ? ok / inRange.length : 0,
+    t0: t0, t1: t1, seconds: bucketed.seconds, buckets: bucketed.buckets,
+    patterns: patterns, examples: examples,
+  };
+}
+
+var inputDirLabel = DATA.inputDir || "input";
+
+function applyRange(t0, t1) {
+  var seconds = bucketEl.value === "auto" ? null : parseInt(bucketEl.value, 10);
+  var view = computeView(t0, t1, seconds);
+  document.getElementById("tiles").outerHTML = tilesHtml(view);
+  document.getElementById("chart").innerHTML = chartSvg(view.buckets, view.seconds);
+  document.getElementById("bucket-table").innerHTML = bucketTableHtml(view);
+  document.getElementById("pattern-rows").innerHTML = patternsHtml(view);
+  document.getElementById("example-rows").innerHTML = examplesHtml(view, inputDirLabel);
+  var bucketName = view.seconds >= WEEK ? "按周" : view.seconds >= DAY ? "按天" : "按小时";
+  document.getElementById("range-caption").textContent =
+    "范围 " + fmtTime(t0) + " ~ " + fmtTime(t1) + " · " + view.total + " 个 round · " + bucketName;
+  attachTooltip(view);
+}
+
+function setActive(preset) {
+  document.querySelectorAll(".preset").forEach(function (btn) {
+    btn.classList.toggle("active", btn === preset);
+  });
+}
+
+document.querySelectorAll(".preset").forEach(function (btn) {
+  btn.addEventListener("click", function () {
+    setActive(btn);
+    var days = btn.getAttribute("data-days");
+    var t0 = fullT0, t1 = fullT1;
+    if (days !== "all") {
+      t0 = Math.max(fullT0, DATA.now - parseInt(days, 10) * DAY);
+      t1 = Math.max(fullT1, t0);
+    }
+    fromEl.value = toLocalInput(t0);
+    toEl.value = toLocalInput(t1);
+    applyRange(t0, t1);
+  });
+});
+function onCustomChange() {
+  setActive(null);
+  var t0 = fromLocalInput(fromEl.value);
+  var t1 = fromLocalInput(toEl.value);
+  if (t0 === null || t1 === null || t1 < t0) return;
+  applyRange(t0, t1);
+}
+fromEl.addEventListener("change", onCustomChange);
+toEl.addEventListener("change", onCustomChange);
+bucketEl.addEventListener("change", function () {
+  var t0 = fromLocalInput(fromEl.value), t1 = fromLocalInput(toEl.value);
+  if (t0 === null || t1 === null) { t0 = fullT0; t1 = fullT1; }
+  applyRange(t0, t1);
+});
+fromEl.value = toLocalInput(fullT0);
+toEl.value = toLocalInput(fullT1);
+
+// —— 悬浮提示：柱本身是命中目标，读数包含该桶全部系列 ——
+var tip = document.getElementById("tip");
+function attachTooltip(view) {
+  var chart = document.getElementById("chart");
+  chart.querySelectorAll(".hit").forEach(function (rect) {
+    function show(ev) {
+      var b = view.buckets[parseInt(rect.getAttribute("data-i"), 10)];
+      if (!b) return;
+      var total = b.ok + b.bad;
+      tip.innerHTML = '<div class="t">' + esc(bucketLabel(b.start, view.seconds)) + "</div>" +
+        '<div class="row"><span class="k ok"></span><b>' + b.ok.toLocaleString() + "</b><span>收齐</span></div>" +
+        '<div class="row"><span class="k bad"></span><b>' + b.bad.toLocaleString() + "</b><span>收不齐</span></div>" +
+        '<div class="row"><b>' + total.toLocaleString() + "</b><span>合计 · 收齐率 " +
+        (total ? pct(b.ok / total) : "-") + "</span></div>";
+      tip.style.display = "block";
+      move(ev);
+    }
+    function move(ev) {
+      var x = (ev.clientX || 0) + 14, y = (ev.clientY || 0) + 14;
+      if (x + tip.offsetWidth > window.innerWidth - 8) x = Math.max(8, ev.clientX - tip.offsetWidth - 14);
+      if (y + tip.offsetHeight > window.innerHeight - 8) y = Math.max(8, ev.clientY - tip.offsetHeight - 14);
+      tip.style.left = x + "px";
+      tip.style.top = y + "px";
+    }
+    function hide() { tip.style.display = "none"; }
+    rect.addEventListener("pointerenter", show);
+    rect.addEventListener("pointermove", move);
+    rect.addEventListener("pointerleave", hide);
+    rect.addEventListener("focus", function () { show({ clientX: rect.getBoundingClientRect().left, clientY: rect.getBoundingClientRect().top }); });
+    rect.addEventListener("blur", hide);
+  });
+}
+attachTooltip(computeView(fullT0, fullT1, null));
+
+// —— serve 模式下的刷新（静态文件里禁用） ——
+var refresh = document.getElementById("refresh");
+var statusEl = document.getElementById("refresh-status");
+if (location.protocol === "file:") {
+  refresh.disabled = true;
+  statusEl.textContent = "当前是静态文件，刷新需用 python3 scripts/completeness_stats.py --serve 打开";
+} else {
+  refresh.addEventListener("click", function () {
+    refresh.disabled = true;
+    statusEl.textContent = "正在重新统计 input/ 下最新的 round…";
+    fetch("refresh", { method: "POST" })
+      .then(function (resp) { return resp.json().catch(function () { return { ok: false, message: "HTTP " + resp.status }; }); })
+      .then(function (result) {
+        if (result.ok) { location.reload(); return; }
+        refresh.disabled = false;
+        statusEl.textContent = "刷新失败：" + (result.message || result.error || "未知错误");
+      })
+      .catch(function (err) {
+        refresh.disabled = false;
+        statusEl.textContent = "刷新失败：" + err;
+      });
+  });
+}
+</script>
+</body>
+</html>

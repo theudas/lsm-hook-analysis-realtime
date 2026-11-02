@@ -2,6 +2,7 @@ __pycache__/
 logs/
 state/
 input/
+stale_archive/
 *.pyc
 *.pyo
 *.pyd

@@ -18,8 +18,10 @@ FILE_META = {
     "test_rules_loading.py": ("lha_realtime/rules.py", "detection_rules.yaml 加载容错、glob 编译"),
     "test_system_baseline.py": ("lha_realtime/rules.py + analyzer.py", "system_baseline 折叠边界、按端点的网络判定"),
     "test_hotspot_stats.py": ("scripts/hotspot_stats.py", "豁免建议的判定边界、生成 YAML 的折叠效果"),
+    "test_completeness_stats.py": ("scripts/completeness_stats.py", "收齐口径的扫描分类、时间分桶、看板页面渲染"),
     "test_state_store.py": ("lha_realtime/state.py", "SQLite schema 迁移、round/job 状态机"),
     "test_pipeline_internals.py": ("lha_realtime/pipeline.py", "落盘工具、消息分派、任务取代、worker 生命周期"),
+    "test_stale_rounds.py": ("lha_realtime/watchdog.py", "超时告警去重、过期归档与 manifest、孤儿目录扫描、消息清理、看门狗接线"),
     "test_receiver.py": ("lha_realtime/receiver.py", "Socket.IO 回调分派、进程启动与清理"),
     "test_config.py": ("lha_realtime/config.py", "环境变量解析与运行时目录准备"),
     "test_logging_utils.py": ("lha_realtime/logging_utils.py", "日志 handler 重建与句柄释放"),
@@ -35,8 +37,10 @@ ORDER = [
     "test_rules_loading.py",
     "test_system_baseline.py",
     "test_hotspot_stats.py",
+    "test_completeness_stats.py",
     "test_state_store.py",
     "test_pipeline_internals.py",
+    "test_stale_rounds.py",
     "test_receiver.py",
     "test_config.py",
     "test_logging_utils.py",
@@ -155,14 +159,15 @@ def main():
     w("")
     w("| 模块 | 语句 | 分支 | 覆盖率 |")
     w("|---|---|---|---|")
-    w("| `analyzer.py` | 624 | 288 | 100% |")
-    w("| `pipeline.py` | 205 | 74 | 100% |")
-    w("| `state.py` | 150 | 30 | 100% |")
+    w("| `analyzer.py` | 657 | 308 | 100% |")
+    w("| `pipeline.py` | 214 | 78 | 100% |")
+    w("| `watchdog.py` | 192 | 68 | 100% |")
+    w("| `state.py` | 165 | 30 | 100% |")
     w("| `rules.py` | 203 | 84 | 100% |")
     w("| `receiver.py` | 55 | 16 | 100% |")
-    w("| `config.py` | 42 | 4 | 100% |")
+    w("| `config.py` | 55 | 6 | 100% |")
     w("| `logging_utils.py` | 20 | 4 | 100% |")
-    w("| **合计** | **1299** | **500** | **100%** |")
+    w("| **合计** | **1561** | **594** | **100%** |")
     w("")
     w("统计口径见 `.coveragerc`（`branch = True`，只统计 `lha_realtime` 包）。")
     w("生成覆盖率报告：`python3 -m coverage run -m unittest discover -s tests && python3 -m coverage html`")

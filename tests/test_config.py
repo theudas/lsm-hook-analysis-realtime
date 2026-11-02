@@ -13,7 +13,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from lha_realtime.config import Settings, _bool_env, _int_env, ensure_runtime_dirs
+from lha_realtime.config import PROJECT_ROOT, Settings, _bool_env, _float_env, _int_env, ensure_runtime_dirs
 
 
 class IntEnvTest(unittest.TestCase):
@@ -46,6 +46,33 @@ class IntEnvTest(unittest.TestCase):
         with patch.dict(os.environ, {"LHA_X": ""}):
             with self.assertRaises(ValueError):
                 _int_env("LHA_X", 7)
+
+
+class FloatEnvTest(unittest.TestCase):
+    def test_unset_variable_uses_the_default(self) -> None:
+        """浮点型环境变量未设置时使用默认值。"""
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(_float_env("LHA_MISSING", 1.5), 1.5)
+
+    def test_valid_value_is_parsed(self) -> None:
+        """合法浮点字符串（含小数与 0）被正确解析。"""
+        for value, expected in (("2.5", 2.5), ("0", 0.0), ("0.001", 0.001), ("48", 48.0)):
+            with self.subTest(value=value):
+                with patch.dict(os.environ, {"LHA_F": value}):
+                    self.assertEqual(_float_env("LHA_F", 1.0), expected)
+
+    def test_non_float_fails_loudly_with_the_variable_name(self) -> None:
+        """非浮点取值在启动阶段报错并指明变量名。"""
+        with patch.dict(os.environ, {"LHA_F": "soon"}):
+            with self.assertRaises(ValueError) as ctx:
+                _float_env("LHA_F", 1.0)
+        self.assertIn("LHA_F", str(ctx.exception))
+
+    def test_empty_string_is_an_error_not_the_default(self) -> None:
+        """空串视为配置错误而非回退默认值。"""
+        with patch.dict(os.environ, {"LHA_F": ""}):
+            with self.assertRaises(ValueError):
+                _float_env("LHA_F", 1.0)
 
 
 class BoolEnvTest(unittest.TestCase):
@@ -90,6 +117,42 @@ class SettingsTest(unittest.TestCase):
         settings = Settings(analyzer_workers=4, push_mock_reports=True)
         self.assertEqual(settings.analyzer_workers, 4)
         self.assertTrue(settings.push_mock_reports)
+
+    def test_watchdog_defaults_are_sane(self) -> None:
+        """看门狗默认值：半小时告警、一天过期、五分钟一轮、归档在项目根目录下。"""
+        settings = Settings(
+            input_dir=Path("/tmp/lha-input"),
+            log_dir=Path("/tmp/lha-logs"),
+            state_dir=Path("/tmp/lha-state"),
+            db_path=Path("/tmp/lha-state/realtime.db"),
+        )
+        self.assertEqual(settings.stale_warn_minutes, 30.0)
+        self.assertEqual(settings.stale_round_hours, 24.0)
+        self.assertEqual(settings.stale_scan_interval_minutes, 5.0)
+        self.assertEqual(settings.message_retention_days, 30)
+        self.assertEqual(settings.stale_archive_dir, PROJECT_ROOT / "stale_archive")
+
+    def test_stale_knobs_are_overridable(self) -> None:
+        """TTL/告警/扫描间隔/归档目录/保留期都可显式覆盖，0 表示关闭对应动作。
+
+        环境变量在模块导入时一次性读入（与进程启动配置的约定一致），无法在
+        实例化时覆盖；env 解析由 FloatEnvTest/IntEnvTest 直接测函数。"""
+        settings = Settings(
+            input_dir=Path("/tmp/lha-input"),
+            log_dir=Path("/tmp/lha-logs"),
+            state_dir=Path("/tmp/lha-state"),
+            db_path=Path("/tmp/lha-state/realtime.db"),
+            stale_round_hours=0,
+            stale_warn_minutes=1.5,
+            stale_scan_interval_minutes=0.5,
+            stale_archive_dir=Path("/tmp/lha-custom-archive"),
+            message_retention_days=7,
+        )
+        self.assertEqual(settings.stale_round_hours, 0.0)
+        self.assertEqual(settings.stale_warn_minutes, 1.5)
+        self.assertEqual(settings.stale_scan_interval_minutes, 0.5)
+        self.assertEqual(settings.message_retention_days, 7)
+        self.assertEqual(settings.stale_archive_dir, Path("/tmp/lha-custom-archive"))
 
 
 class EnsureRuntimeDirsTest(unittest.TestCase):

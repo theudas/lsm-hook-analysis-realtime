@@ -3,7 +3,7 @@
 > 本文件由 `tests/*.py` 自动解析生成，与代码同源，不手工维护。
 > 重新生成：见文末「如何重新生成」。
 
-**合计 350 个用例，分布在 14 个测试文件中。**
+**合计 419 个用例，分布在 16 个测试文件中。**
 执行方式：`python3 -m unittest discover -s tests -v`
 
 ## 总览
@@ -19,12 +19,14 @@
 | 7 | `test_rules_loading.py` | lha_realtime/rules.py | 43 |
 | 8 | `test_system_baseline.py` | lha_realtime/rules.py + analyzer.py | 20 |
 | 9 | `test_hotspot_stats.py` | scripts/hotspot_stats.py | 11 |
-| 10 | `test_state_store.py` | lha_realtime/state.py | 33 |
-| 11 | `test_pipeline_internals.py` | lha_realtime/pipeline.py | 43 |
-| 12 | `test_receiver.py` | lha_realtime/receiver.py | 16 |
-| 13 | `test_config.py` | lha_realtime/config.py | 12 |
-| 14 | `test_logging_utils.py` | lha_realtime/logging_utils.py | 7 |
-| | **合计** | | **350** |
+| 10 | `test_completeness_stats.py` | scripts/completeness_stats.py | 25 |
+| 11 | `test_state_store.py` | lha_realtime/state.py | 33 |
+| 12 | `test_pipeline_internals.py` | lha_realtime/pipeline.py | 44 |
+| 13 | `test_stale_rounds.py` | lha_realtime/watchdog.py | 37 |
+| 14 | `test_receiver.py` | lha_realtime/receiver.py | 16 |
+| 15 | `test_config.py` | lha_realtime/config.py | 18 |
+| 16 | `test_logging_utils.py` | lha_realtime/logging_utils.py | 7 |
+| | **合计** | | **419** |
 
 ---
 
@@ -540,7 +542,65 @@
 
 ---
 
-## 10. `test_state_store.py`
+## 10. `test_completeness_stats.py`
+
+**被测对象**：scripts/completeness_stats.py  
+**覆盖范围**：收齐口径的扫描分类、时间分桶、看板页面渲染  
+**用例数**：25
+
+### ScanRoundsTest
+
+| 编号 | 用例 | 验证点 |
+|---|---|---|
+| 240 | `test_scan_classifies_complete_and_incomplete_rounds` | scan classifies complete and incomplete rounds |
+| 241 | `test_scan_ignores_dot_dirs_and_files` | scan ignores dot dirs and files |
+| 242 | `test_scan_missing_input_dir_returns_empty` | scan missing input dir returns empty |
+| 243 | `test_round_time_prefers_round_start_mtime` | round time prefers round start mtime |
+| 244 | `test_round_time_falls_back_to_earliest_arrival_file` | round time falls back to earliest arrival file |
+| 245 | `test_round_time_uses_kernel_files_then_dir_mtime` | round time uses kernel files then dir mtime |
+
+### MissingFromMaskTest
+
+| 编号 | 用例 | 验证点 |
+|---|---|---|
+| 246 | `test_full_mask_has_no_missing` | full mask has no missing |
+| 247 | `test_missing_inputs_are_named` | missing inputs are named |
+| 248 | `test_missing_kernel_payload_is_grouped` | missing kernel payload is grouped |
+| 249 | `test_missing_start_and_ir` | missing start and ir |
+
+### BucketTest
+
+| 编号 | 用例 | 验证点 |
+|---|---|---|
+| 250 | `test_auto_bucket_seconds_by_span` | auto bucket seconds by span |
+| 251 | `test_bucketize_keeps_empty_buckets` | bucketize keeps empty buckets |
+| 252 | `test_bucketize_counts_ok_and_bad` | bucketize counts ok and bad |
+| 253 | `test_bucketize_excludes_out_of_range_records` | bucketize excludes out of range records |
+| 254 | `test_bucketize_coarsens_when_over_limit` | bucketize coarsens when over limit |
+| 255 | `test_bucket_label_by_granularity` | 标签用本地时间（与运维看板习惯一致），分钟截断到整点。 |
+| 256 | `test_nice_ceiling_rounds_to_step_units` | nice ceiling rounds to step units |
+| 257 | `test_pct_and_compact_formatting` | pct and compact formatting |
+
+### BuildTest
+
+| 编号 | 用例 | 验证点 |
+|---|---|---|
+| 258 | `test_build_computes_totals_ratio_and_patterns` | build computes totals ratio and patterns |
+| 259 | `test_build_respects_time_range` | build respects time range |
+| 260 | `test_examples_are_newest_first_and_limited` | examples are newest first and limited |
+
+### RenderTest
+
+| 编号 | 用例 | 验证点 |
+|---|---|---|
+| 261 | `test_render_writes_self_contained_page` | render writes self contained page |
+| 262 | `test_chart_svg_clamps_tiny_segment_to_nonnegative_height` | 段高不足 2px 表面缝时钳到 0，不产生负 height（负值会被浏览器丢弃并报错）。 |
+| 263 | `test_generate_returns_zero_and_writes_report` | generate returns zero and writes report |
+| 264 | `test_generate_exits_one_on_empty_input` | generate exits one on empty input |
+
+---
+
+## 11. `test_state_store.py`
 
 **被测对象**：lha_realtime/state.py  
 **覆盖范围**：SQLite schema 迁移、round/job 状态机  
@@ -550,164 +610,250 @@
 
 | 编号 | 用例 | 验证点 |
 |---|---|---|
-| 240 | `test_now_iso_has_second_precision` | 中文按 UTF-8 计 3 字节，确保日志里的 size 是真实字节数。 |
-| 241 | `test_json_size_counts_utf8_bytes_not_characters` | 中文按 UTF-8 计 3 字节，确保日志里的 size 是真实字节数。 |
+| 265 | `test_now_iso_has_second_precision` | 中文按 UTF-8 计 3 字节，确保日志里的 size 是真实字节数。 |
+| 266 | `test_json_size_counts_utf8_bytes_not_characters` | 中文按 UTF-8 计 3 字节，确保日志里的 size 是真实字节数。 |
 
 ### SchemaMigrationTest
 
 | 编号 | 用例 | 验证点 |
 |---|---|---|
-| 242 | `test_pre_ir_database_gains_the_new_columns` | 模拟 has_ir / round_start 相关列引入之前建的库。 |
+| 267 | `test_pre_ir_database_gains_the_new_columns` | 模拟 has_ir / round_start 相关列引入之前建的库。 |
 
 ### InboxTest
 
 | 编号 | 用例 | 验证点 |
 |---|---|---|
-| 243 | `test_enqueue_records_type_round_id_and_size` | 入库消息记录 push_type、round_id、字节数并初始为 pending。 |
-| 244 | `test_payload_without_known_keys_is_still_accepted` | 不带已知字段的 payload 也接收入库，不丢消息。 |
-| 245 | `test_fetch_marks_messages_processing_and_counts_attempts` | 已被取走的消息不会再次出现在 pending 里。 |
-| 246 | `test_fetch_respects_limit_and_id_order` | 取消息按 id 升序并遵守条数上限。 |
-| 247 | `test_fetch_on_empty_inbox_returns_empty_list` | inbox 为空时返回空列表。 |
-| 248 | `test_fail_without_retry_is_terminal` | 标记为不可重试的消息置 failed 且不再被取出。 |
-| 249 | `test_complete_message_stores_generation_and_keeps_old_value_on_none` | 完成消息时记录代次，传 None 不覆盖已有值。 |
+| 268 | `test_enqueue_records_type_round_id_and_size` | 入库消息记录 push_type、round_id、字节数并初始为 pending。 |
+| 269 | `test_payload_without_known_keys_is_still_accepted` | 不带已知字段的 payload 也接收入库，不丢消息。 |
+| 270 | `test_fetch_marks_messages_processing_and_counts_attempts` | 已被取走的消息不会再次出现在 pending 里。 |
+| 271 | `test_fetch_respects_limit_and_id_order` | 取消息按 id 升序并遵守条数上限。 |
+| 272 | `test_fetch_on_empty_inbox_returns_empty_list` | inbox 为空时返回空列表。 |
+| 273 | `test_fail_without_retry_is_terminal` | 标记为不可重试的消息置 failed 且不再被取出。 |
+| 274 | `test_complete_message_stores_generation_and_keeps_old_value_on_none` | 完成消息时记录代次，传 None 不覆盖已有值。 |
 
 ### RoundStateTest
 
 | 编号 | 用例 | 验证点 |
 |---|---|---|
-| 250 | `test_first_message_creates_generation_one` | 首条消息为 round 建档，代次从 1 开始。 |
-| 251 | `test_orphan_artifacts_on_first_sight_request_a_clear` | 首次见到但磁盘有残留产物时要求清理。 |
-| 252 | `test_existing_round_without_force_keeps_its_generation` | 未强制新代次时沿用当前代次。 |
-| 253 | `test_unknown_round_has_no_current_generation` | 查询未知 round 返回 None 而不是抛异常。 |
-| 254 | `test_unsupported_input_kind_is_rejected` | 非法的输入类型直接抛 ValueError。 |
-| 255 | `test_recording_against_a_missing_generation_raises` | 针对不存在的代次写入时显式报错。 |
-| 256 | `test_round_only_becomes_ready_after_all_four_inputs` | 四类输入全部就位后 round 才转为 ready。 |
-| 257 | `test_kernel_paths_are_only_overwritten_by_non_null_values` | 重复的 round_kernel 不会把已有内核文件路径覆盖成空。 |
-| 258 | `test_replay_bumps_generation_and_keeps_persisted_inputs` | 重放推进代次但保留磁盘输入与就绪标记。 |
-| 259 | `test_replay_cancels_an_in_flight_job` | 重放会取消在途分析任务并标注取代原因。 |
-| 260 | `test_finished_jobs_are_not_cancelled_by_a_replay` | 重放不会改写已完成任务的状态。 |
+| 275 | `test_first_message_creates_generation_one` | 首条消息为 round 建档，代次从 1 开始。 |
+| 276 | `test_orphan_artifacts_on_first_sight_request_a_clear` | 首次见到但磁盘有残留产物时要求清理。 |
+| 277 | `test_existing_round_without_force_keeps_its_generation` | 未强制新代次时沿用当前代次。 |
+| 278 | `test_unknown_round_has_no_current_generation` | 查询未知 round 返回 None 而不是抛异常。 |
+| 279 | `test_unsupported_input_kind_is_rejected` | 非法的输入类型直接抛 ValueError。 |
+| 280 | `test_recording_against_a_missing_generation_raises` | 针对不存在的代次写入时显式报错。 |
+| 281 | `test_round_only_becomes_ready_after_all_four_inputs` | 四类输入全部就位后 round 才转为 ready。 |
+| 282 | `test_kernel_paths_are_only_overwritten_by_non_null_values` | 重复的 round_kernel 不会把已有内核文件路径覆盖成空。 |
+| 283 | `test_replay_bumps_generation_and_keeps_persisted_inputs` | 重放推进代次但保留磁盘输入与就绪标记。 |
+| 284 | `test_replay_cancels_an_in_flight_job` | 重放会取消在途分析任务并标注取代原因。 |
+| 285 | `test_finished_jobs_are_not_cancelled_by_a_replay` | 重放不会改写已完成任务的状态。 |
 
 ### AnalysisJobTest
 
 | 编号 | 用例 | 验证点 |
 |---|---|---|
-| 261 | `test_enqueue_is_idempotent_per_generation` | 同一代次重复入队只产生一个任务。 |
-| 262 | `test_enqueue_moves_round_from_ready_to_queued` | 入队后 round 状态转 queued 并记录任务 id。 |
-| 263 | `test_fetch_on_empty_queue_returns_none` | 队列为空时取任务返回 None。 |
-| 264 | `test_fetch_claims_the_oldest_job_exactly_once` | 任务按 id 顺序被独占取走，不会重复分发。 |
-| 265 | `test_status_transitions_propagate_to_the_round` | 任务状态变更同步反映到 round 状态。 |
-| 266 | `test_failure_with_retry_requeues_the_job` | 可重试的失败把任务放回队列并累加尝试次数。 |
-| 267 | `test_failure_without_retry_is_terminal` | 不可重试的失败置 analysis_failed 且不再出队。 |
-| 268 | `test_operations_on_an_unknown_job_are_silent_no_ops` | 任务行被并发清掉时这些调用必须安静返回，而不是抛异常打断 worker。 |
-| 269 | `test_enqueue_raises_if_the_job_row_cannot_be_read_back` | 防御性分支：INSERT 之后立刻回读不到行（并发删库/磁盘异常），必须显式报错， |
-| 270 | `test_counts_reflect_pending_and_queued_work` | 计数接口如实反映待处理消息与排队任务数。 |
+| 286 | `test_enqueue_is_idempotent_per_generation` | 同一代次重复入队只产生一个任务。 |
+| 287 | `test_enqueue_moves_round_from_ready_to_queued` | 入队后 round 状态转 queued 并记录任务 id。 |
+| 288 | `test_fetch_on_empty_queue_returns_none` | 队列为空时取任务返回 None。 |
+| 289 | `test_fetch_claims_the_oldest_job_exactly_once` | 任务按 id 顺序被独占取走，不会重复分发。 |
+| 290 | `test_status_transitions_propagate_to_the_round` | 任务状态变更同步反映到 round 状态。 |
+| 291 | `test_failure_with_retry_requeues_the_job` | 可重试的失败把任务放回队列并累加尝试次数。 |
+| 292 | `test_failure_without_retry_is_terminal` | 不可重试的失败置 analysis_failed 且不再出队。 |
+| 293 | `test_operations_on_an_unknown_job_are_silent_no_ops` | 任务行被并发清掉时这些调用必须安静返回，而不是抛异常打断 worker。 |
+| 294 | `test_enqueue_raises_if_the_job_row_cannot_be_read_back` | 防御性分支：INSERT 之后立刻回读不到行（并发删库/磁盘异常），必须显式报错， |
+| 295 | `test_counts_reflect_pending_and_queued_work` | 计数接口如实反映待处理消息与排队任务数。 |
 
 ### PersistenceTest
 
 | 编号 | 用例 | 验证点 |
 |---|---|---|
-| 271 | `test_state_survives_a_reopen` | round 与任务状态在重开库后完整保留。 |
-| 272 | `test_explicit_db_path_argument_wins_over_settings` | 显式传入的 db_path 优先于配置项。 |
+| 296 | `test_state_survives_a_reopen` | round 与任务状态在重开库后完整保留。 |
+| 297 | `test_explicit_db_path_argument_wins_over_settings` | 显式传入的 db_path 优先于配置项。 |
 
 ---
 
-## 11. `test_pipeline_internals.py`
+## 12. `test_pipeline_internals.py`
 
 **被测对象**：lha_realtime/pipeline.py  
 **覆盖范围**：落盘工具、消息分派、任务取代、worker 生命周期  
-**用例数**：43
+**用例数**：44
 
 ### SafeLenTest
 
 | 编号 | 用例 | 验证点 |
 |---|---|---|
-| 273 | `test_none_is_zero` | None 的长度按 0 处理，日志摘要不报错。 |
-| 274 | `test_non_string_values_are_stringified` | 非字符串值先转字符串再取长度。 |
+| 298 | `test_none_is_zero` | None 的长度按 0 处理，日志摘要不报错。 |
+| 299 | `test_non_string_values_are_stringified` | 非字符串值先转字符串再取长度。 |
 
 ### FileHelperTest
 
 | 编号 | 用例 | 验证点 |
 |---|---|---|
-| 275 | `test_atomic_write_creates_parents_and_leaves_no_temp_file` | 原子写自动建父目录且不残留临时文件。 |
-| 276 | `test_atomic_write_overwrites_in_place` | 重复写入同一路径时原地覆盖。 |
-| 277 | `test_is_within_input_dir` | 正确区分 input 目录内外的路径。 |
-| 278 | `test_path_traversal_escape_is_rejected` | 带 .. 的穿越路径被判定为越界。 |
-| 279 | `test_has_round_artifacts` | 按已知产物文件名判断目录是否有残留。 |
-| 280 | `test_clear_round_dir_refuses_paths_outside_input_dir` | 拒绝清理 input 目录之外的路径，防止误删。 |
-| 281 | `test_clear_round_dir_removes_inputs_dotfiles_and_analysis_dirs` | 清理输入、临时点文件与 analysis_ 目录，保留无关文件。 |
-| 282 | `test_clear_round_dir_creates_a_missing_directory` | 目录不存在时先创建再清理。 |
-| 283 | `test_copy_kernel_file_handles_missing_sources` | 源目录不是文件时同样跳过，而不是抛异常。 |
-| 284 | `test_copy_kernel_file_copies_content_atomically` | 内核文件按原子方式拷贝且不留临时文件。 |
+| 300 | `test_atomic_write_creates_parents_and_leaves_no_temp_file` | 原子写自动建父目录且不残留临时文件。 |
+| 301 | `test_atomic_write_overwrites_in_place` | 重复写入同一路径时原地覆盖。 |
+| 302 | `test_is_within_input_dir` | 正确区分 input 目录内外的路径。 |
+| 303 | `test_path_traversal_escape_is_rejected` | 带 .. 的穿越路径被判定为越界。 |
+| 304 | `test_has_round_artifacts` | 按已知产物文件名判断目录是否有残留。 |
+| 305 | `test_clear_round_dir_refuses_paths_outside_input_dir` | 拒绝清理 input 目录之外的路径，防止误删。 |
+| 306 | `test_clear_round_dir_removes_inputs_dotfiles_and_analysis_dirs` | 清理输入、临时点文件与 analysis_ 目录，保留无关文件。 |
+| 307 | `test_clear_round_dir_creates_a_missing_directory` | 目录不存在时先创建再清理。 |
+| 308 | `test_copy_kernel_file_handles_missing_sources` | 源目录不是文件时同样跳过，而不是抛异常。 |
+| 309 | `test_copy_kernel_file_copies_content_atomically` | 内核文件按原子方式拷贝且不留临时文件。 |
 
 ### MessageDispatchTest
 
 | 编号 | 用例 | 验证点 |
 |---|---|---|
-| 285 | `test_non_dict_payload_is_ignored` | payload 不是字典时忽略且不建 round。 |
-| 286 | `test_message_without_round_id_is_ignored` | 缺少 round_id 的消息被丢弃并标记处理完成。 |
-| 287 | `test_unhandled_push_type_is_ignored` | 未支持的 push_type 不落盘、不建状态。 |
-| 288 | `test_empty_ir_ready_is_skipped_without_marking_has_ir` | 空 IR 的 round_ir_ready 不置 has_ir，继续等待真实 IR。 |
-| 289 | `test_legacy_round_end_ir_json_is_adopted_when_no_standalone_ir` | 旧上游把 IR 放在 round_end 里时被采纳并触发就绪。 |
-| 290 | `test_persist_ir_writes_and_flags_without_an_emptiness_check` | _persist_ir 是 round_end 兼容路径直接调用的版本：调用方已确认 ir_json 非空， |
-| 291 | `test_record_ir_returns_none_only_for_an_empty_payload` | _record_ir 仅在 ir_json 为空时返回 None。 |
-| 292 | `test_standalone_ir_wins_over_a_later_round_end_ir_json` | 已有独立 IR 后，迟到的 round_end.ir_json 不覆盖它。 |
-| 293 | `test_kernel_files_that_cannot_be_copied_leave_paths_null` | 内核文件拷贝失败时路径留空，但 round_kernel 仍算到达。 |
-| 294 | `test_orphan_artifacts_without_state_are_cleared_before_reuse` | 有产物无状态的目录在复用前被清理干净。 |
+| 310 | `test_non_dict_payload_is_ignored` | payload 不是字典时忽略且不建 round。 |
+| 311 | `test_message_without_round_id_is_ignored` | 缺少 round_id 的消息被丢弃并标记处理完成。 |
+| 312 | `test_unhandled_push_type_is_ignored` | 未支持的 push_type 不落盘、不建状态。 |
+| 313 | `test_empty_ir_ready_is_skipped_without_marking_has_ir` | 空 IR 的 round_ir_ready 不置 has_ir，继续等待真实 IR。 |
+| 314 | `test_legacy_round_end_ir_json_is_adopted_when_no_standalone_ir` | 旧上游把 IR 放在 round_end 里时被采纳并触发就绪。 |
+| 315 | `test_persist_ir_writes_and_flags_without_an_emptiness_check` | _persist_ir 是 round_end 兼容路径直接调用的版本：调用方已确认 ir_json 非空， |
+| 316 | `test_record_ir_returns_none_only_for_an_empty_payload` | _record_ir 仅在 ir_json 为空时返回 None。 |
+| 317 | `test_standalone_ir_wins_over_a_later_round_end_ir_json` | 已有独立 IR 后，迟到的 round_end.ir_json 不覆盖它。 |
+| 318 | `test_kernel_files_that_cannot_be_copied_leave_paths_null` | 内核文件拷贝失败时路径留空，但 round_kernel 仍算到达。 |
+| 319 | `test_orphan_artifacts_without_state_are_cleared_before_reuse` | 有产物无状态的目录在复用前被清理干净。 |
 
 ### NewGenerationDecisionTest
 
 | 编号 | 用例 | 验证点 |
 |---|---|---|
-| 295 | `test_unknown_round_without_artifacts_stays_on_generation_one` | 全新 round 且目录干净时不触发新代次。 |
-| 296 | `test_unknown_round_with_artifacts_forces_a_clear` | 无状态但有产物时要求先清理再处理。 |
-| 297 | `test_metadata_messages_never_start_a_new_generation` | round_end/round_start 等元数据消息不触发重跑。 |
-| 298 | `test_required_input_on_a_settled_round_starts_a_re_run` | 已结束的 round 再收到 IR 或内核消息时触发重跑。 |
-| 299 | `test_required_input_while_still_receiving_overwrites_in_place` | round 仍在收集阶段时重复消息原地覆盖，不换代次。 |
-| 300 | `test_failed_round_is_terminal_and_can_be_replayed` | 分析失败的 round 属终态，可被重放重跑。 |
+| 320 | `test_unknown_round_without_artifacts_stays_on_generation_one` | 全新 round 且目录干净时不触发新代次。 |
+| 321 | `test_unknown_round_with_artifacts_forces_a_clear` | 无状态但有产物时要求先清理再处理。 |
+| 322 | `test_metadata_messages_never_start_a_new_generation` | round_end/round_start 等元数据消息不触发重跑。 |
+| 323 | `test_required_input_on_a_settled_round_starts_a_re_run` | 已结束的 round 再收到 IR 或内核消息时触发重跑。 |
+| 324 | `test_required_input_while_still_receiving_overwrites_in_place` | round 仍在收集阶段时重复消息原地覆盖，不换代次。 |
+| 325 | `test_failed_round_is_terminal_and_can_be_replayed` | 分析失败的 round 属终态，可被重放重跑。 |
 
 ### IngestFailureTest
 
 | 编号 | 用例 | 验证点 |
 |---|---|---|
-| 301 | `test_transient_failure_is_requeued_until_max_attempts` | max_attempts=2，第一次失败后仍可重试。 |
-| 302 | `test_one_bad_message_does_not_block_the_rest_of_the_batch` | 单条消息处理失败不影响同批次其余消息。 |
+| 326 | `test_transient_failure_is_requeued_until_max_attempts` | max_attempts=2，第一次失败后仍可重试。 |
+| 327 | `test_one_bad_message_does_not_block_the_rest_of_the_batch` | 单条消息处理失败不影响同批次其余消息。 |
 
 ### AnalysisSupersessionTest
 
 | 编号 | 用例 | 验证点 |
 |---|---|---|
-| 303 | `test_job_superseded_before_analysis_is_abandoned` | 任务在分析前已被取代时直接放弃，不做无谓分析。 |
-| 304 | `test_job_superseded_during_analysis_does_not_write_outputs` | 分析过程中被取代时不写出报告，避免覆盖新结果。 |
-| 305 | `test_job_superseded_before_push_does_not_report` | 上报前被取代时不上报，避免推送过期报告。 |
-| 306 | `test_superseded_job_is_not_retried_even_below_max_attempts` | 被取代的任务重试没有意义，必须直接置 failed 而不是回到 queued。 |
+| 328 | `test_job_superseded_before_analysis_is_abandoned` | 任务在分析前已被取代时直接放弃，不做无谓分析。 |
+| 329 | `test_job_superseded_during_analysis_does_not_write_outputs` | 分析过程中被取代时不写出报告，避免覆盖新结果。 |
+| 330 | `test_job_superseded_before_push_does_not_report` | 上报前被取代时不上报，避免推送过期报告。 |
+| 331 | `test_superseded_job_is_not_retried_even_below_max_attempts` | 被取代的任务重试没有意义，必须直接置 failed 而不是回到 queued。 |
 
 ### AnalysisPushTest
 
 | 编号 | 用例 | 验证点 |
 |---|---|---|
-| 307 | `test_push_failure_marks_the_job_failed` | 上报失败经重试后任务置 analysis_failed 并记录原因。 |
-| 308 | `test_mock_round_is_analyzed_but_not_pushed` | mock round 正常生成报告但跳过上报。 |
-| 309 | `test_analyze_once_on_empty_queue_returns_false` | 队列为空时分析循环返回 False 以进入休眠。 |
+| 332 | `test_push_failure_marks_the_job_failed` | 上报失败经重试后任务置 analysis_failed 并记录原因。 |
+| 333 | `test_mock_round_is_analyzed_but_not_pushed` | mock round 正常生成报告但跳过上报。 |
+| 334 | `test_analyze_once_on_empty_queue_returns_false` | 队列为空时分析循环返回 False 以进入休眠。 |
 
 ### WorkerLifecycleTest
 
 | 编号 | 用例 | 验证点 |
 |---|---|---|
-| 310 | `test_start_spawns_one_ingest_worker_and_n_analysis_workers` | 启动后线程数与命名符合配置的 worker 数量。 |
-| 311 | `test_zero_or_negative_worker_setting_still_starts_one_worker` | worker 数配成 0 时兜底启动一个分析线程。 |
-| 312 | `test_running_workers_process_a_round_end_to_end` | 真实多线程环境下完整处理一个 round 到 done。 |
-| 313 | `test_stop_is_observed_by_both_loops` | 已置位时循环体直接退出，不会阻塞。 |
+| 335 | `test_start_spawns_one_ingest_worker_and_n_analysis_workers` | 启动后线程数与命名符合配置的 worker 数量（含默认开启的看门狗线程）。 |
+| 336 | `test_watchdog_thread_is_absent_when_disabled` | 看门狗的三个动作全部关闭时不启动对应线程。 |
+| 337 | `test_zero_or_negative_worker_setting_still_starts_one_worker` | worker 数配成 0 时兜底启动一个分析线程。 |
+| 338 | `test_running_workers_process_a_round_end_to_end` | 真实多线程环境下完整处理一个 round 到 done。 |
+| 339 | `test_stop_is_observed_by_both_loops` | 已置位时循环体直接退出，不会阻塞。 |
 
 ### MainEntrypointTest
 
 | 编号 | 用例 | 验证点 |
 |---|---|---|
-| 314 | `test_main_starts_logs_a_heartbeat_then_stops_on_interrupt` | main 启动 worker、打心跳日志，收到中断后停止并回收。 |
-| 315 | `test_module_entrypoint_runs_main` | `python3 -m lha_realtime.pipeline` 走 __main__ 分支。 |
+| 340 | `test_main_starts_logs_a_heartbeat_then_stops_on_interrupt` | main 启动 worker、打心跳日志，收到中断后停止并回收。 |
+| 341 | `test_module_entrypoint_runs_main` | `python3 -m lha_realtime.pipeline` 走 __main__ 分支。 |
 
 ---
 
-## 12. `test_receiver.py`
+## 13. `test_stale_rounds.py`
+
+**被测对象**：lha_realtime/watchdog.py  
+**覆盖范围**：超时告警去重、过期归档与 manifest、孤儿目录扫描、消息清理、看门狗接线  
+**用例数**：37
+
+### InputMaskTest
+
+| 编号 | 用例 | 验证点 |
+|---|---|---|
+| 342 | `test_empty_dir_has_zero_mask` | empty dir has zero mask |
+| 343 | `test_all_required_files_plus_ir_is_complete` | all required files plus ir is complete |
+| 344 | `test_ir_bit_is_the_high_bit` | ir bit is the high bit |
+| 345 | `test_standalone_ir_json_without_payload_does_not_count` | standalone ir json without payload does not count |
+| 346 | `test_embedded_ir_in_round_end_counts` | 旧上游把 IR 内嵌在 round_end.ir_json 里，同样算收齐。 |
+| 347 | `test_broken_ir_json_falls_back_to_round_end` | broken ir json falls back to round end |
+| 348 | `test_broken_round_end_json_counts_as_no_ir` | broken round end json counts as no ir |
+| 349 | `test_empty_ir_and_no_round_end_is_incomplete` | empty ir and no round end is incomplete |
+
+### PrivateHelpersTest
+
+| 编号 | 用例 | 验证点 |
+|---|---|---|
+| 350 | `test_fmt_age_covers_all_units` | fmt age covers all units |
+| 351 | `test_age_seconds_handles_missing_and_garbage` | age seconds handles missing and garbage |
+| 352 | `test_is_within_checks_containment` | is within checks containment |
+
+### EnabledPropertyTest
+
+| 编号 | 用例 | 验证点 |
+|---|---|---|
+| 353 | `test_all_knobs_zero_disables_watchdog` | all knobs zero disables watchdog |
+| 354 | `test_any_knobs_nonzero_enables_watchdog` | any knobs nonzero enables watchdog |
+
+### WarnTest
+
+| 编号 | 用例 | 验证点 |
+|---|---|---|
+| 355 | `test_fresh_round_is_not_warned` | fresh round is not warned |
+| 356 | `test_stale_round_warns_once_per_updated_at` | stale round warns once per updated at |
+| 357 | `test_warn_log_names_missing_inputs` | warn log names missing inputs |
+| 358 | `test_unparseable_updated_at_is_skipped` | unparseable updated at is skipped |
+
+### ExpireTest
+
+| 编号 | 用例 | 验证点 |
+|---|---|---|
+| 359 | `test_stale_state_round_is_archived_and_deleted` | stale state round is archived and deleted |
+| 360 | `test_expired_rounds_do_not_warn_again` | expired rounds do not warn again |
+| 361 | `test_complete_on_disk_round_is_never_expired` | 磁盘收齐但状态仍停在 receiving（崩溃残留）的 round 永不归档。 |
+| 362 | `test_complete_on_disk_round_clears_stale_warn_state` | 磁盘侧补齐全部输入后，即使状态行没跟上也不再告警。 |
+| 363 | `test_expire_aborts_if_round_settles_mid_scan` | 状态行删除是原子的：恰好在此刻收齐（不再是 receiving）就放弃过期。 |
+| 364 | `test_state_round_outside_input_clears_row_only` | round_dir 在 input/ 之外：只清状态行，磁盘目录原样保留。 |
+| 365 | `test_state_round_without_disk_artifacts_clears_row_only` | 状态行存在但磁盘目录从未创建：过期时无需归档任何东西。 |
+
+### OrphanScanTest
+
+| 编号 | 用例 | 验证点 |
+|---|---|---|
+| 366 | `test_orphan_dir_past_ttl_is_archived` | orphan dir past ttl is archived |
+| 367 | `test_orphan_with_state_row_is_untouched` | 有状态行的目录归状态路径管，孤儿扫描不能重复处理。 |
+| 368 | `test_young_orphan_dir_is_kept` | young orphan dir is kept |
+| 369 | `test_complete_orphan_dir_is_kept` | complete orphan dir is kept |
+| 370 | `test_dot_entries_and_files_are_ignored` | dot entries and files are ignored |
+| 371 | `test_empty_orphan_dir_uses_dir_mtime` | empty orphan dir uses dir mtime |
+| 372 | `test_rearchived_round_gets_suffix` | 同名 round 第二、三次收不齐时，归档目的地追加 __2、__3。 |
+| 373 | `test_many_expirations_log_a_summary` | many expirations log a summary |
+| 374 | `test_unreadable_input_dir_is_reported` | input 路径不可列出（这里是：根本不是目录）：记录告警，本轮不做过期。 |
+| 375 | `test_archive_inside_input_dir_disables_expiry_only` | 归档目录在 input/ 之内会自我吞噬：过期跳过，告警照常。 |
+
+### PurgeTest
+
+| 编号 | 用例 | 验证点 |
+|---|---|---|
+| 376 | `test_old_done_messages_are_purged` | old done messages are purged |
+| 377 | `test_retention_zero_disables_purge` | retention zero disables purge |
+
+### PipelineIntegrationTest
+
+| 编号 | 用例 | 验证点 |
+|---|---|---|
+| 378 | `test_watchdog_loop_scans_until_stopped` | watchdog loop scans until stopped |
+
+---
+
+## 14. `test_receiver.py`
 
 **被测对象**：lha_realtime/receiver.py  
 **覆盖范围**：Socket.IO 回调分派、进程启动与清理  
@@ -717,29 +863,29 @@
 
 | 编号 | 用例 | 验证点 |
 |---|---|---|
-| 316 | `test_handlers_are_registered_on_the_client` | 回调函数已注册到 Socket.IO 客户端上。 |
-| 317 | `test_non_dict_message_is_dropped` | 非字典消息（字符串/列表/None/数字）一律丢弃。 |
-| 318 | `test_message_without_round_id_is_dropped` | 缺少 round_id 的推送不入库。 |
-| 319 | `test_empty_round_id_is_treated_as_missing` | round_id 为空串等同缺失，不入库。 |
-| 320 | `test_round_start_is_enqueued_verbatim` | round_start 原样入库，不在接收端做裁剪。 |
-| 321 | `test_round_end_summary_tolerates_missing_fields` | action_json / ir_json 缺失时 safe_len 返回 0，摘要日志不能抛异常。 |
-| 322 | `test_round_end_with_full_payload` | 字段齐全的 round_end 摘要日志与入库均正常。 |
-| 323 | `test_round_kernel_summary` | round_kernel 的内核文件路径摘要与入库。 |
-| 324 | `test_round_ir_ready_summary` | round_ir_ready 的 IR 长度摘要与入库。 |
-| 325 | `test_unknown_push_type_is_still_persisted` | 接收端不做过滤：未知类型也入库，由 pipeline 决定忽略，避免丢消息。 |
-| 326 | `test_missing_push_type_is_still_persisted` | 没有 push_type 的消息同样入库，交由 pipeline 判断。 |
+| 379 | `test_handlers_are_registered_on_the_client` | 回调函数已注册到 Socket.IO 客户端上。 |
+| 380 | `test_non_dict_message_is_dropped` | 非字典消息（字符串/列表/None/数字）一律丢弃。 |
+| 381 | `test_message_without_round_id_is_dropped` | 缺少 round_id 的推送不入库。 |
+| 382 | `test_empty_round_id_is_treated_as_missing` | round_id 为空串等同缺失，不入库。 |
+| 383 | `test_round_start_is_enqueued_verbatim` | round_start 原样入库，不在接收端做裁剪。 |
+| 384 | `test_round_end_summary_tolerates_missing_fields` | action_json / ir_json 缺失时 safe_len 返回 0，摘要日志不能抛异常。 |
+| 385 | `test_round_end_with_full_payload` | 字段齐全的 round_end 摘要日志与入库均正常。 |
+| 386 | `test_round_kernel_summary` | round_kernel 的内核文件路径摘要与入库。 |
+| 387 | `test_round_ir_ready_summary` | round_ir_ready 的 IR 长度摘要与入库。 |
+| 388 | `test_unknown_push_type_is_still_persisted` | 接收端不做过滤：未知类型也入库，由 pipeline 决定忽略，避免丢消息。 |
+| 389 | `test_missing_push_type_is_still_persisted` | 没有 push_type 的消息同样入库，交由 pipeline 判断。 |
 
 ### ConnectionEventTest
 
 | 编号 | 用例 | 验证点 |
 |---|---|---|
-| 327 | `test_connect_and_disconnect_handlers_are_side_effect_free` | 连接与断开回调只记日志，不产生数据副作用。 |
+| 390 | `test_connect_and_disconnect_handlers_are_side_effect_free` | 连接与断开回调只记日志，不产生数据副作用。 |
 
 ### MainTest
 
 | 编号 | 用例 | 验证点 |
 |---|---|---|
-| 328 | `test_main_starts_workers_then_connects_with_websocket_transport` | main 先起 worker 再按配置的 path/namespace 建立 websocket 连接。 |
+| 391 | `test_main_starts_workers_then_connects_with_websocket_transport` | main 先起 worker 再按配置的 path/namespace 建立 websocket 连接。 |
 
 ### ScriptEntrypointTest
 
@@ -747,53 +893,64 @@
 
 | 编号 | 用例 | 验证点 |
 |---|---|---|
-| 329 | `test_normal_exit_stops_pipeline_and_closes_the_store` | 正常退出时停 worker、断开连接、关闭数据库。 |
-| 330 | `test_keyboard_interrupt_still_runs_the_cleanup` | 收到 Ctrl+C 中断时清理逻辑照常执行。 |
-| 331 | `test_cleanup_skips_disconnect_when_never_connected` | 从未连上时跳过 disconnect，不产生多余调用。 |
+| 392 | `test_normal_exit_stops_pipeline_and_closes_the_store` | 正常退出时停 worker、断开连接、关闭数据库。 |
+| 393 | `test_keyboard_interrupt_still_runs_the_cleanup` | 收到 Ctrl+C 中断时清理逻辑照常执行。 |
+| 394 | `test_cleanup_skips_disconnect_when_never_connected` | 从未连上时跳过 disconnect，不产生多余调用。 |
 
 ---
 
-## 13. `test_config.py`
+## 15. `test_config.py`
 
 **被测对象**：lha_realtime/config.py  
 **覆盖范围**：环境变量解析与运行时目录准备  
-**用例数**：12
+**用例数**：18
 
 ### IntEnvTest
 
 | 编号 | 用例 | 验证点 |
 |---|---|---|
-| 332 | `test_unset_variable_uses_the_default` | 整型环境变量未设置时使用默认值。 |
-| 333 | `test_valid_value_is_parsed` | 合法整数字符串被正确解析。 |
-| 334 | `test_negative_and_zero_are_accepted` | 负数与 0 都是合法取值。 |
-| 335 | `test_non_integer_fails_loudly_with_the_variable_name` | 非整数取值在启动阶段报错并指明变量名。 |
-| 336 | `test_empty_string_is_an_error_not_the_default` | 空串视为配置错误而非回退默认值。 |
+| 395 | `test_unset_variable_uses_the_default` | 整型环境变量未设置时使用默认值。 |
+| 396 | `test_valid_value_is_parsed` | 合法整数字符串被正确解析。 |
+| 397 | `test_negative_and_zero_are_accepted` | 负数与 0 都是合法取值。 |
+| 398 | `test_non_integer_fails_loudly_with_the_variable_name` | 非整数取值在启动阶段报错并指明变量名。 |
+| 399 | `test_empty_string_is_an_error_not_the_default` | 空串视为配置错误而非回退默认值。 |
+
+### FloatEnvTest
+
+| 编号 | 用例 | 验证点 |
+|---|---|---|
+| 400 | `test_unset_variable_uses_the_default` | 浮点型环境变量未设置时使用默认值。 |
+| 401 | `test_valid_value_is_parsed` | 合法浮点字符串（含小数与 0）被正确解析。 |
+| 402 | `test_non_float_fails_loudly_with_the_variable_name` | 非浮点取值在启动阶段报错并指明变量名。 |
+| 403 | `test_empty_string_is_an_error_not_the_default` | 空串视为配置错误而非回退默认值。 |
 
 ### BoolEnvTest
 
 | 编号 | 用例 | 验证点 |
 |---|---|---|
-| 337 | `test_unset_variable_uses_the_default` | 布尔型环境变量未设置时使用默认值。 |
-| 338 | `test_accepted_truthy_spellings` | 1/true/yes/y/on 及大小写与空格变体均为真。 |
-| 339 | `test_everything_else_is_false` | 其余取值一律为假，不做宽松解释。 |
+| 404 | `test_unset_variable_uses_the_default` | 布尔型环境变量未设置时使用默认值。 |
+| 405 | `test_accepted_truthy_spellings` | 1/true/yes/y/on 及大小写与空格变体均为真。 |
+| 406 | `test_everything_else_is_false` | 其余取值一律为假，不做宽松解释。 |
 
 ### SettingsTest
 
 | 编号 | 用例 | 验证点 |
 |---|---|---|
-| 340 | `test_defaults_are_self_consistent` | 默认配置自洽：上报地址基于 API 根地址，库路径在状态目录下。 |
-| 341 | `test_settings_are_frozen` | 配置对象不可变，运行期无法被意外改写。 |
-| 342 | `test_overrides_are_honoured` | 显式传入的配置项覆盖默认值。 |
+| 407 | `test_defaults_are_self_consistent` | 默认配置自洽：上报地址基于 API 根地址，库路径在状态目录下。 |
+| 408 | `test_settings_are_frozen` | 配置对象不可变，运行期无法被意外改写。 |
+| 409 | `test_overrides_are_honoured` | 显式传入的配置项覆盖默认值。 |
+| 410 | `test_watchdog_defaults_are_sane` | 看门狗默认值：半小时告警、一天过期、五分钟一轮、归档在项目根目录下。 |
+| 411 | `test_stale_knobs_are_overridable` | TTL/告警/扫描间隔/归档目录/保留期都可显式覆盖，0 表示关闭对应动作。 |
 
 ### EnsureRuntimeDirsTest
 
 | 编号 | 用例 | 验证点 |
 |---|---|---|
-| 343 | `test_creates_all_three_directories_and_is_idempotent` | input/logs/state 三个目录被创建且可重复调用。 |
+| 412 | `test_creates_all_three_directories_and_is_idempotent` | input/logs/state 三个目录被创建且可重复调用。 |
 
 ---
 
-## 14. `test_logging_utils.py`
+## 16. `test_logging_utils.py`
 
 **被测对象**：lha_realtime/logging_utils.py  
 **覆盖范围**：日志 handler 重建与句柄释放  
@@ -803,13 +960,13 @@
 
 | 编号 | 用例 | 验证点 |
 |---|---|---|
-| 344 | `test_creates_the_log_dir_and_attaches_both_handlers` | 创建日志目录并同时挂载控制台与文件两个 handler。 |
-| 345 | `test_messages_reach_the_log_file` | 日志内容按格式写入文件，含级别与 logger 名。 |
-| 346 | `test_reconfiguring_closes_the_previous_file_handler` | 重新配置时关闭旧 FileHandler，释放文件句柄。 |
-| 347 | `test_reconfiguring_does_not_close_stdout` | 重新配置不会连带关闭 sys.stdout。 |
-| 348 | `test_repeated_setup_does_not_accumulate_handlers` | 反复调用不会累积 handler 造成重复输出。 |
-| 349 | `test_logging_still_works_after_reconfiguration` | 重新配置后日志仍能正常写入。 |
-| 350 | `test_separate_names_get_separate_loggers` | 不同名字得到独立 logger 与独立日志文件。 |
+| 413 | `test_creates_the_log_dir_and_attaches_both_handlers` | 创建日志目录并同时挂载控制台与文件两个 handler。 |
+| 414 | `test_messages_reach_the_log_file` | 日志内容按格式写入文件，含级别与 logger 名。 |
+| 415 | `test_reconfiguring_closes_the_previous_file_handler` | 重新配置时关闭旧 FileHandler，释放文件句柄。 |
+| 416 | `test_reconfiguring_does_not_close_stdout` | 重新配置不会连带关闭 sys.stdout。 |
+| 417 | `test_repeated_setup_does_not_accumulate_handlers` | 反复调用不会累积 handler 造成重复输出。 |
+| 418 | `test_logging_still_works_after_reconfiguration` | 重新配置后日志仍能正常写入。 |
+| 419 | `test_separate_names_get_separate_loggers` | 不同名字得到独立 logger 与独立日志文件。 |
 
 ---
 
@@ -825,14 +982,15 @@ python3 scripts/gen_testcases.py
 
 | 模块 | 语句 | 分支 | 覆盖率 |
 |---|---|---|---|
-| `analyzer.py` | 624 | 288 | 100% |
-| `pipeline.py` | 205 | 74 | 100% |
-| `state.py` | 150 | 30 | 100% |
+| `analyzer.py` | 657 | 308 | 100% |
+| `pipeline.py` | 214 | 78 | 100% |
+| `watchdog.py` | 192 | 68 | 100% |
+| `state.py` | 165 | 30 | 100% |
 | `rules.py` | 203 | 84 | 100% |
 | `receiver.py` | 55 | 16 | 100% |
-| `config.py` | 42 | 4 | 100% |
+| `config.py` | 55 | 6 | 100% |
 | `logging_utils.py` | 20 | 4 | 100% |
-| **合计** | **1299** | **500** | **100%** |
+| **合计** | **1561** | **594** | **100%** |
 
 统计口径见 `.coveragerc`（`branch = True`，只统计 `lha_realtime` 包）。
 生成覆盖率报告：`python3 -m coverage run -m unittest discover -s tests && python3 -m coverage html`

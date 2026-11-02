@@ -22,6 +22,16 @@ def _int_env(name: str, default: int) -> int:
         raise ValueError(f"{name} must be an integer, got {value!r}") from exc
 
 
+def _float_env(name: str, default: float) -> float:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a number, got {value!r}") from exc
+
+
 def _bool_env(name: str, default: bool = False) -> bool:
     value = os.environ.get(name)
     if value is None:
@@ -53,6 +63,13 @@ class Settings:
     analysis_poll_interval: float = float(os.environ.get("LHA_ANALYSIS_POLL_INTERVAL", "0.02"))
     retry_backoff_seconds: int = _int_env("LHA_RETRY_BACKOFF_SECONDS", 10)
     max_attempts: int = _int_env("LHA_MAX_ATTEMPTS", 3)
+
+    # 采集看门狗：round 长时间收不齐时先告警、超时后归档（0 关闭对应动作）。
+    stale_round_hours: float = _float_env("LHA_STALE_ROUND_HOURS", 24.0)
+    stale_warn_minutes: float = _float_env("LHA_STALE_WARN_MINUTES", 30.0)
+    stale_scan_interval_minutes: float = _float_env("LHA_STALE_SCAN_MINUTES", 5.0)
+    stale_archive_dir: Path = Path(os.environ.get("LHA_STALE_ARCHIVE_DIR", PROJECT_ROOT / "stale_archive"))
+    message_retention_days: int = _int_env("LHA_MESSAGE_RETENTION_DAYS", 30)
 
 
 SETTINGS = Settings()

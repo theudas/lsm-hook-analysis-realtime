@@ -36,6 +36,7 @@ SERVICE_LOGGERS = (
     "lha_realtime_analyzer",
     "lha_realtime_pipeline",
     "lha_realtime_receiver",
+    "lha_realtime_watchdog",
 )
 
 _TRUTHY = {"1", "true", "yes", "y", "on"}

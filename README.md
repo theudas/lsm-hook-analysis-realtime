@@ -82,6 +82,7 @@ cd lsm-hook-analysis-realtime
 tail -f logs/receiver.log
 tail -f logs/pipeline.log
 tail -f logs/analyzer.log
+tail -f logs/watchdog.log
 ```
 
 ## 4. 本地调试
@@ -169,6 +170,11 @@ sudo systemctl reset-failed lha_realtime.service
 - `LHA_PUSH_MOCK_REPORTS`：是否上报 `is_mock=true` 的 round，默认 `0`，设置 `1` 后上报
 - `LHA_ANALYZER_WORKERS`：分析 worker 数量，默认 `1`
 - `LHA_MAX_ATTEMPTS`：失败重试次数，默认 `3`
+- `LHA_STALE_WARN_MINUTES`：round 停在 receiving 多久后告警，默认 `30`，设 `0` 关闭
+- `LHA_STALE_ROUND_HOURS`：多久未收齐后归档，默认 `24`，设 `0` 关闭
+- `LHA_STALE_SCAN_MINUTES`：看门狗扫描间隔（分钟），默认 `5`
+- `LHA_STALE_ARCHIVE_DIR`：过期 round 归档目录，默认 `./stale_archive`
+- `LHA_MESSAGE_RETENTION_DAYS`：已完成消息行的保留天数，默认 `30`，设 `0` 关闭
 
 ## 7. 重复 Round 的处理
 
@@ -196,6 +202,38 @@ python3 scripts/hotspot_stats.py           # 只生成静态文件 reports/hotsp
   非本机网络地址不给配置，是否放行由人决定。
 - 刷新在子进程里进行，每次都会读到最新的规则文件和 `input/` 下新到的 round。`--serve` 默认只监听本机，
   需要远程查看时用 `--host 0.0.0.0`（页面含路径信息，注意访问控制）。
+
+## 7.2 看门狗：收不齐 round 的告警与归档
+
+四类消息正常几秒到几分钟内收齐。一个 round 长时间停在 receiving，或 `input/` 里留着没有状态行的
+半成品目录，都说明上游采集或推送出了问题。`pipeline` 启动时会拉起一个看门狗线程，默认每 5 分钟扫一轮，
+日志在 `logs/watchdog.log`：
+
+- 超过 `LHA_STALE_WARN_MINUTES` 未收齐：记一条 WARNING，指明该 round 等了多久、还缺哪些消息。
+  同一个 round 在同一次 `updated_at` 上只告警一次；来了新消息会重新计时，再次超时会再告警。
+- 超过 `LHA_STALE_ROUND_HOURS` 未收齐：`input/<round_id>/` 移到归档目录并删除状态行。
+  之后同一 `round_id` 再来消息会作为全新 round 从头收集，数据不丢。每轮发生过期都会在归档目录写一份
+  `manifest_<时间戳>.json`，记录每个 round 等了多久、缺哪些消息、被移到了哪里，便于事后对账。
+- 只处理 `receiving` 状态的 round 与 `input/` 下没有状态行的未收齐目录；磁盘上六类输入齐全的 round
+  永不归档也不告警——语料回放依赖它们。
+- 顺带清理超过 `LHA_MESSAGE_RETENTION_DAYS` 的已完成消息行（仅审计用途）。
+
+三个阈值（告警、过期、消息清理）都设 `0` 可分别关闭对应动作；全为 `0` 时看门狗线程不启动。
+
+## 7.3 采集完整度看板
+
+按时间维度盘点收齐 / 收不齐的比例，把“上游采集不完整”从事后盘点提前到随时可看（在项目根目录执行）：
+
+```bash
+python3 scripts/completeness_stats.py --serve   # 打开 http://127.0.0.1:8766/ ，页面上的“刷新”按钮按需重新统计
+python3 scripts/completeness_stats.py           # 只生成静态文件 reports/completeness.html
+```
+
+- 与看门狗共用同一套“收齐”口径（五类文件 + 可用 IR），看板、归档、就绪门控三者的判定不漂移。
+- 时间范围可选预设（近 1 小时 / 1 天 / 7 天 / 30 天）或自定义起止；分桶粒度按跨度自动选（小时 / 天 / 周）。
+- 主图按时间桶展示收齐（灰）与收不齐（红）的数量对比，悬停可看每桶明细；下方给缺失模式排行
+  （缺 `round_end`、缺内核数据文件等）与收不齐的 round 示例（最新在前，含缺失清单与等待时长）。
+- 扫描在 `--serve` 模式下按需触发，默认只监听本机；远程查看用 `--host 0.0.0.0`（注意访问控制）。
 
 ## 8. 运行测试
 
@@ -225,7 +263,7 @@ python3 -m coverage html        # 输出到 reports/coverage/html/index.html
 统计口径写在 `.coveragerc` 里（`branch = True`，只统计 `lha_realtime` 包），
 不需要在命令行重复指定参数。
 
-当前基线：**350 个用例，语句覆盖 100%，分支覆盖 100%**。
+当前基线：**419 个用例，语句覆盖 100%，分支覆盖 100%**。
 
 ### 8.2 测试文件分工
 
@@ -240,15 +278,17 @@ python3 -m coverage html        # 输出到 reports/coverage/html/index.html
 | `test_rules_loading.py` | `detection_rules.yaml` 加载容错、glob 编译 |
 | `test_system_baseline.py` | `system_baseline` 折叠边界、按端点的网络判定 |
 | `test_hotspot_stats.py` | 豁免建议的判定边界、生成 YAML 的折叠效果 |
+| `test_completeness_stats.py` | 收齐口径的扫描分类、时间分桶、看板页面渲染 |
 | `test_state_store.py` | SQLite schema 迁移、round/job 状态机流转 |
 | `test_pipeline_internals.py` | 目录清理越界保护、消息分派早退、worker 生命周期 |
+| `test_stale_rounds.py` | 超时告警去重、过期归档与 manifest、孤儿目录扫描、消息清理 |
 | `test_receiver.py` | Socket.IO 回调分派、进程启动与清理路径 |
 | `test_config.py` | 环境变量解析与运行时目录准备 |
 | `test_logging_utils.py` | 日志 handler 的重建与句柄释放 |
 
 ### 8.3 用例清单
 
-全部 325 个用例逐条列在 `tests/TEST_CASES.md`，按测试文件 → 测试类 → 用例编号组织，
+全部 419 个用例逐条列在 `tests/TEST_CASES.md`，按测试文件 → 测试类 → 用例编号组织，
 每条带验证点说明。该文件由测试源码解析生成，不手工维护；改动测试后重新生成：
 
 ```bash
@@ -273,8 +313,11 @@ lsm-hook-analysis-realtime/
 │   ├── pipeline.py        # inbox 消费、落盘、分析 worker、重复 round 处理
 │   ├── receiver.py        # Socket.IO 接收端
 │   ├── rules.py           # 加载 detection_rules.yaml，编译敏感规则
-│   └── state.py           # SQLite inbox、round state、analysis jobs
+│   ├── state.py           # SQLite inbox、round state、analysis jobs
+│   └── watchdog.py        # 收不齐 round 的超时告警、过期归档与消息清理
 ├── scripts/
+│   ├── completeness_stats.py        # 采集完整度看板（收齐比例、缺失模式、示例，--serve 支持页面内刷新）
+│   ├── completeness_template.html   # 看板页面模板
 │   ├── gen_testcases.py            # 生成 tests/TEST_CASES.md
 │   ├── hotspot_stats.py            # 语料重放 → 内核行为豁免建议页面（--serve 支持页面内刷新）
 │   ├── hotspot_template.html       # 页面模板
@@ -288,11 +331,13 @@ lsm-hook-analysis-realtime/
 │   ├── test_analyzer_push.py       # 上报链路失败模式
 │   ├── test_collector_filter.py    # 采集器 stdio 通道过滤
 │   ├── test_collection_status.py   # 采集完整性自检
+│   ├── test_completeness_stats.py  # 采集完整度看板
 │   ├── test_rules_loading.py       # 规则加载与 glob 编译
 │   ├── test_system_baseline.py     # 系统基线折叠与网络端点判定
 │   ├── test_hotspot_stats.py       # 豁免建议判定与 YAML 片段
 │   ├── test_state_store.py         # SQLite 状态机
 │   ├── test_pipeline_internals.py  # 落盘工具与 worker
+│   ├── test_stale_rounds.py        # 看门狗：告警、归档、孤儿扫描
 │   ├── test_receiver.py            # Socket.IO 接收端
 │   ├── test_config.py              # 环境变量解析
 │   └── test_logging_utils.py       # 日志 handler 重建

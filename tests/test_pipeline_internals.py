@@ -521,7 +521,7 @@ class AnalysisPushTest(PipelineTestBase):
 
 class WorkerLifecycleTest(PipelineTestBase):
     def test_start_spawns_one_ingest_worker_and_n_analysis_workers(self) -> None:
-        """启动后线程数与命名符合配置的 worker 数量。"""
+        """启动后线程数与命名符合配置的 worker 数量（含默认开启的看门狗线程）。"""
         settings = Settings(
             input_dir=self.settings.input_dir,
             log_dir=self.settings.log_dir,
@@ -530,17 +530,41 @@ class WorkerLifecycleTest(PipelineTestBase):
             analyzer_workers=3,
             ingest_poll_interval=0.001,
             analysis_poll_interval=0.001,
+            stale_scan_interval_minutes=0.001,
         )
         pipeline = RealtimePipeline(store=self.store, settings=settings, push_reports=False)
         pipeline.start()
         try:
             names = [thread.name for thread in pipeline._threads]
-            self.assertEqual(names, ["lha-ingest", "lha-analyze-1", "lha-analyze-2", "lha-analyze-3"])
+            self.assertEqual(
+                names,
+                ["lha-ingest", "lha-analyze-1", "lha-analyze-2", "lha-analyze-3", "lha-watchdog"],
+            )
             self.assertTrue(all(thread.is_alive() for thread in pipeline._threads))
         finally:
             pipeline.stop()
             pipeline.join()
         self.assertFalse(any(thread.is_alive() for thread in pipeline._threads))
+
+    def test_watchdog_thread_is_absent_when_disabled(self) -> None:
+        """看门狗的三个动作全部关闭时不启动对应线程。"""
+        settings = Settings(
+            input_dir=self.settings.input_dir,
+            log_dir=self.settings.log_dir,
+            state_dir=self.settings.state_dir,
+            db_path=self.settings.db_path,
+            stale_round_hours=0,
+            stale_warn_minutes=0,
+            message_retention_days=0,
+        )
+        pipeline = RealtimePipeline(store=self.store, settings=settings, push_reports=False)
+        pipeline.start()
+        try:
+            names = [thread.name for thread in pipeline._threads]
+            self.assertEqual(names, ["lha-ingest", "lha-analyze-1"])
+        finally:
+            pipeline.stop()
+            pipeline.join()
 
     def test_zero_or_negative_worker_setting_still_starts_one_worker(self) -> None:
         """worker 数配成 0 时兜底启动一个分析线程。"""
@@ -552,6 +576,9 @@ class WorkerLifecycleTest(PipelineTestBase):
             analyzer_workers=0,
             ingest_poll_interval=0.001,
             analysis_poll_interval=0.001,
+            stale_round_hours=0,
+            stale_warn_minutes=0,
+            message_retention_days=0,
         )
         pipeline = RealtimePipeline(store=self.store, settings=settings, push_reports=False)
         pipeline.start()
@@ -621,6 +648,13 @@ class MainEntrypointTest(unittest.TestCase):
         store.fetch_pending_messages.return_value = []
         store.fetch_queued_job.return_value = None
         store.counts.return_value = {"pending_messages": 0, "queued_jobs": 0}
+        # runpy 会重新执行 pipeline.py 源码：RealtimePipeline 和 SETTINGS 在 __main__
+        # 命名空间里是全新的真实对象，patch pipeline 模块上的属性够不到它们，只有它
+        # import 的源模块（state / watchdog / time）上的 patch 才生效。不屏蔽 watchdog
+        # 的话，真实看门狗线程会按默认配置扫描真实 input/，把磁盘上的“孤儿”round
+        # 归档走（mock store 的 round_ids() 会让所有目录都被当成孤儿）。
+        watchdog = MagicMock()
+        watchdog.enabled = False
 
         def sleep(seconds):
             # 只打断 main 的心跳等待，worker 循环的短轮询照常返回。
@@ -629,9 +663,11 @@ class MainEntrypointTest(unittest.TestCase):
             return None
 
         with patch("lha_realtime.state.StateStore", return_value=store), \
+             patch("lha_realtime.watchdog.StaleRoundWatchdog", return_value=watchdog), \
              patch("time.sleep", side_effect=sleep):
             runpy.run_module("lha_realtime.pipeline", run_name="__main__")
 
+        watchdog.scan_once.assert_not_called()
         store.counts.assert_not_called()
 
 

@@ -293,6 +293,8 @@ Socket.IO push
 
 同一个 `round_id` 再次到达时按新 round 处理：取消旧的未完成任务、清理旧的输入与产物、重新等四类消息。`generation` 字段用来区分代次，避免旧任务写坏新一代的产物。
 
+链路旁还有一个看门狗线程（`watchdog.py`）：round 超时未收齐先告警，再超时则把 `input/<round_id>/` 归档并清状态行，顺带清理过期的已完成消息行；磁盘上输入齐全的目录永不动。归档时的 manifest 与 `scripts/completeness_stats.py` 看板共用同一套“收齐”口径（`REQUIRED_FILES` + 可用 IR），判定不漂移。
+
 ---
 
 ## 5. 判定模型
@@ -621,6 +623,11 @@ IR 一条网络动作都没允许，命令本身也不含任何网络语义，`h
 | `LHA_PUSH_MOCK_REPORTS` | `0` | 是否上报 `is_mock=true` 的 round |
 | `LHA_ANALYZER_WORKERS` | `1` | 分析 worker 数 |
 | `LHA_MAX_ATTEMPTS` | `3` | 失败重试次数 |
+| `LHA_STALE_WARN_MINUTES` | `30` | 未收齐告警阈值（分钟），`0` 关闭 |
+| `LHA_STALE_ROUND_HOURS` | `24` | 未收齐归档阈值（小时），`0` 关闭 |
+| `LHA_STALE_SCAN_MINUTES` | `5` | 看门狗扫描间隔（分钟） |
+| `LHA_STALE_ARCHIVE_DIR` | `./stale_archive` | 过期 round 归档目录 |
+| `LHA_MESSAGE_RETENTION_DAYS` | `30` | 已完成消息行保留天数，`0` 关闭 |
 
 ---
 

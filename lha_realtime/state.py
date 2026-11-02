@@ -511,6 +511,53 @@ class StateStore:
         current = self.current_generation(round_id)
         return current == generation
 
+    def round_ids(self) -> set[str]:
+        """全部 round 的 id 集合，供看门狗区分“有状态行”与孤儿目录。"""
+        with self._lock:
+            return {
+                row["round_id"]
+                for row in self._conn.execute("SELECT round_id FROM round_states")
+            }
+
+    def fetch_receiving_rounds(self) -> list[dict[str, Any]]:
+        """仍在等消息的 round，看门狗的告警与过期对象。"""
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT round_id, generation, round_dir, has_round_start, has_round_end,
+                       has_round_kernel, has_ir, created_at, updated_at
+                FROM round_states
+                WHERE status = 'receiving'
+                """
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def delete_round(self, round_id: str, expect_status: str = "receiving") -> bool:
+        """删除 round 状态行，但仅当它仍处于期望状态。
+
+        状态检查与删除在同一事务里：round 若恰在此刻收齐或被重放，rowcount 为 0，
+        调用方据此放弃本次过期。删除后同一 round_id 再来消息会作为全新 round
+        从头收集，磁盘产物由调用方归档。
+        """
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                "DELETE FROM round_states WHERE round_id = ? AND status = ?",
+                (round_id, expect_status),
+            )
+            return cursor.rowcount > 0
+
+    def purge_messages_before(self, cutoff_iso: str) -> int:
+        """删除早于 cutoff 的已完成消息行（仅审计用途），pending 行不动。"""
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                """
+                DELETE FROM inbox_messages
+                WHERE status IN ('done', 'failed') AND updated_at < ?
+                """,
+                (cutoff_iso,),
+            )
+            return cursor.rowcount
+
     def _set_job_and_round_status(self, job_id: int, status: str) -> None:
         timestamp = now_iso()
         with self._lock, self._conn:

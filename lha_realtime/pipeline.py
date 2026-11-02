@@ -14,6 +14,7 @@ from . import analyzer
 from .config import SETTINGS, Settings, ensure_runtime_dirs
 from .logging_utils import setup_logging
 from .state import ROUND_TERMINAL_STATUSES, StateStore, json_size, now_iso
+from .watchdog import StaleRoundWatchdog
 
 
 INPUT_FILES = {
@@ -93,6 +94,7 @@ class RealtimePipeline:
         self.settings = settings
         self.store = store or StateStore(settings=settings)
         self.push_reports = push_reports
+        self.watchdog = StaleRoundWatchdog(store=self.store, settings=settings)
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
 
@@ -105,6 +107,8 @@ class RealtimePipeline:
             self._threads.append(
                 threading.Thread(target=self.analysis_loop, name=f"lha-analyze-{index + 1}", daemon=True)
             )
+        if self.watchdog.enabled:
+            self._threads.append(threading.Thread(target=self.watchdog_loop, name="lha-watchdog", daemon=True))
         for thread in self._threads:
             thread.start()
 
@@ -125,6 +129,19 @@ class RealtimePipeline:
             processed = self.analyze_once()
             if not processed:
                 time.sleep(self.settings.analysis_poll_interval)
+
+    def watchdog_loop(self) -> None:
+        log.info(
+            "watchdog worker started interval_minutes=%s stale_hours=%s warn_minutes=%s retention_days=%s",
+            self.settings.stale_scan_interval_minutes,
+            self.settings.stale_round_hours,
+            self.settings.stale_warn_minutes,
+            self.settings.message_retention_days,
+        )
+        while not self._stop.is_set():
+            self.watchdog.scan_once()
+            # 用 wait 而不是 sleep，stop() 时能立刻退出而不是等完整个扫描间隔。
+            self._stop.wait(self.settings.stale_scan_interval_minutes * 60)
 
     def ingest_once(self, limit: int = 10) -> int:
         messages = self.store.fetch_pending_messages(limit=limit)
